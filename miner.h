@@ -143,9 +143,10 @@ enum pool_strategy {
 	POOL_ROUNDROBIN,
 	POOL_ROTATE,
 	POOL_LOADBALANCE,
+	POOL_HOP,
 };
 
-#define TOP_STRATEGY (POOL_LOADBALANCE)
+#define TOP_STRATEGY (POOL_HOP)
 
 struct strategies {
 	const char *s;

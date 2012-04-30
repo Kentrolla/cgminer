@@ -73,6 +73,7 @@ struct strategies strategies[] = {
 	{ "Round Robin" },
 	{ "Rotate" },
 	{ "Load Balance" },
+	{ "Hop" },
 };
 
 static char packagename[255];
@@ -492,6 +493,12 @@ static char *set_devices(char *arg)
 	return NULL;
 }
 
+static char *set_hop(enum pool_strategy *strategy)
+{
+	*strategy = POOL_HOP;
+	return NULL;
+}
+
 static char *set_loadbalance(enum pool_strategy *strategy)
 {
 	*strategy = POOL_LOADBALANCE;
@@ -814,6 +821,9 @@ static struct opt_table opt_config_table[] = {
 		     set_kernel, NULL, NULL,
 		     "Override kernel to use (diablo, poclbm, phatk or diakgcn) - one value or comma separated"),
 #endif
+	OPT_WITHOUT_ARG("--hop",
+		     set_hop, &pool_strategy,
+		     "Change multipool strategy from failover to earliest longpoll hop"),
 	OPT_WITHOUT_ARG("--load-balance",
 		     set_loadbalance, &pool_strategy,
 		     "Change multipool strategy from failover to even load balance"),
@@ -2374,9 +2384,10 @@ void switch_pools(struct pool *selected)
 	}
 
 	switch (pool_strategy) {
-		/* Both of these set to the master pool */
+		/* All of these set to the master pool */
 		case POOL_FAILOVER:
 		case POOL_LOADBALANCE:
+		case POOL_HOP:
 			for (i = 0; i < total_pools; i++) {
 				pool = priority_pool(i);
 				if (!pool->idle && pool->enabled) {
@@ -2580,6 +2591,8 @@ static void test_work_current(struct work *work)
 			applog(LOG_NOTICE, "LONGPOLL from pool %d detected new block",
 			       work->pool->pool_no);
 			work->longpoll = false;
+			if (pool_strategy == POOL_HOP && work->pool != current_pool())
+				switch_pools(work->pool);
 		} else if (have_longpoll)
 			applog(LOG_NOTICE, "New block detected on network before longpoll");
 		else
@@ -2858,6 +2871,8 @@ void write_config(FILE *fcfg)
 
 	/* Special case options */
 	fprintf(fcfg, ",\n\"shares\" : \"%d\"", opt_shares);
+	if (pool_strategy == POOL_HOP)
+		fputs(",\n\"hop\" : true", fcfg);
 	if (pool_strategy == POOL_LOADBALANCE)
 		fputs(",\n\"load-balance\" : true", fcfg);
 	if (pool_strategy == POOL_ROUNDROBIN)
