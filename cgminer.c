@@ -2113,7 +2113,7 @@ static bool workio_get_work(struct workio_cmd *wc)
 
 	ret = tq_push(pool->getwork_q, wc);
 
-	mutex_unlock(&pool->pool_lock);
+	mutex_lock(&pool->pool_lock);
 	--pool->get_wait;
 	mutex_unlock(&pool->pool_lock);
 
