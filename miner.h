@@ -637,6 +637,9 @@ struct pool {
 
 	CURL *submit_curl;
 	CURL *getwork_curl;
+
+	int submit_wait;
+	int get_wait;
 };
 
 struct work {

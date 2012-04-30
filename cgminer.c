@@ -2040,7 +2040,7 @@ static void *get_extra_work(void *userdata)
 
 	gettimeofday(&now, NULL);
 	abstime.tv_nsec = now.tv_usec * 1000;
-	abstime.tv_sec = now.tv_sec + 60;
+	abstime.tv_sec = now.tv_sec + 300;
 
 	while ((wc = tq_pop(pool->getwork_q, &abstime)) != NULL) {
 		struct work *ret_work;
@@ -2084,7 +2084,7 @@ static void *get_extra_work(void *userdata)
 
 		gettimeofday(&now, NULL);
 		abstime.tv_nsec = now.tv_usec * 1000;
-		abstime.tv_sec = now.tv_sec + 60;
+		abstime.tv_sec = now.tv_sec + 300;
 	}
 
 	curl_easy_cleanup(curl);
@@ -2099,15 +2099,25 @@ static bool workio_get_work(struct workio_cmd *wc)
 {
 	struct pool *pool = select_pool(wc->lagging);
 	pthread_t get_thread;
+	bool ret;
+	int gw;
 
-	if (!list_empty(&pool->getwork_q->q)) {
-		if (unlikely(pthread_create(&get_thread, NULL, get_extra_work, (void *)pool))) {
+	mutex_lock(&pool->pool_lock);
+	gw = ++pool->get_wait;
+	mutex_unlock(&pool->pool_lock);
+
+	if (gw > 5) {
+		if (unlikely(pthread_create(&get_thread, NULL, get_extra_work, (void *)pool)))
 			applog(LOG_ERR, "Failed to create get_work_thread");
-			return false;
-		}
 	}
 
-	return tq_push(pool->getwork_q, wc);
+	ret = tq_push(pool->getwork_q, wc);
+
+	mutex_unlock(&pool->pool_lock);
+	--pool->get_wait;
+	mutex_unlock(&pool->pool_lock);
+
+	return ret;
 }
 
 static bool stale_work(struct work *work, bool share)
@@ -2221,7 +2231,7 @@ static void *submit_extra_work(void *userdata)
 
 	gettimeofday(&now, NULL);
 	abstime.tv_nsec = now.tv_usec * 1000;
-	abstime.tv_sec = now.tv_sec + 60;
+	abstime.tv_sec = now.tv_sec + 300;
 
 	while ((wc = tq_pop(pool->submit_q, &abstime)) != NULL) {
 		struct work *work = wc->u.work;
@@ -2270,7 +2280,7 @@ static void *submit_extra_work(void *userdata)
 
 		gettimeofday(&now, NULL);
 		abstime.tv_nsec = now.tv_usec * 1000;
-		abstime.tv_sec = now.tv_sec + 60;
+		abstime.tv_sec = now.tv_sec + 300;
 	}
 
 	curl_easy_cleanup(curl);
@@ -2285,15 +2295,27 @@ static void *submit_extra_work(void *userdata)
 static bool workio_submit_work(struct workio_cmd *wc)
 {
 	pthread_t submit_thread;
+	struct pool *pool;
+	bool ret;
+	int sw;
 
-	if (!list_empty(&wc->u.work->pool->submit_q->q)) {
-		if (unlikely(pthread_create(&submit_thread, NULL, submit_extra_work, (void *)wc->u.work->pool))) {
+	pool = wc->u.work->pool;
+	mutex_lock(&pool->pool_lock);
+	sw = ++pool->submit_wait;
+	mutex_unlock(&pool->pool_lock);
+
+	if (sw > 5) {
+		if (unlikely(pthread_create(&submit_thread, NULL, submit_extra_work, (void *)pool)))
 			applog(LOG_ERR, "Failed to create submit_work_thread");
-			return false;
-		}
 	}
 
-	return tq_push(wc->u.work->pool->submit_q, wc);
+	ret = tq_push(pool->submit_q, wc);
+
+	mutex_lock(&pool->pool_lock);
+	--pool->submit_wait;
+	mutex_unlock(&pool->pool_lock);
+
+	return ret;
 }
 
 /* Find the pool that currently has the highest priority */
