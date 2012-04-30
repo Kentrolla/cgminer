@@ -2104,13 +2104,13 @@ static bool workio_get_work(struct workio_cmd *wc)
 
 	mutex_lock(&pool->pool_lock);
 	gw = ++pool->gs_wait;
-	if (gw > 5) {
+	if (gw >= 5) {
 		recruit = true;
 		pool->gs_wait -= 5;
 	}
 	mutex_unlock(&pool->pool_lock);
 
-	if (recruit) {
+	if (recruit && !pool->submit_fail) {
 		if (unlikely(pthread_create(&get_thread, NULL, get_extra_work, (void *)pool)))
 			applog(LOG_ERR, "Failed to create get_work_thread");
 	}
@@ -2308,13 +2308,13 @@ static bool workio_submit_work(struct workio_cmd *wc)
 	pool = wc->u.work->pool;
 	mutex_lock(&pool->pool_lock);
 	sw = ++pool->gs_wait;
-	if (sw > 5) {
+	if (sw >= 5) {
 		recruit = true;
 		pool->gs_wait -= 5;
 	}
 	mutex_unlock(&pool->pool_lock);
 
-	if (recruit) {
+	if (recruit && !pool->submit_fail) {
 		if (unlikely(pthread_create(&submit_thread, NULL, submit_extra_work, (void *)pool)))
 			applog(LOG_ERR, "Failed to create submit_work_thread");
 	}
