@@ -2098,15 +2098,19 @@ static void *get_extra_work(void *userdata)
 static bool workio_get_work(struct workio_cmd *wc)
 {
 	struct pool *pool = select_pool(wc->lagging);
+	bool ret, recruit = false;
 	pthread_t get_thread;
-	bool ret;
 	int gw;
 
 	mutex_lock(&pool->pool_lock);
-	gw = ++pool->get_wait;
+	gw = ++pool->gs_wait;
+	if (gw > 5) {
+		recruit = true;
+		pool->gs_wait -= 5;
+	}
 	mutex_unlock(&pool->pool_lock);
 
-	if (gw > 5) {
+	if (recruit) {
 		if (unlikely(pthread_create(&get_thread, NULL, get_extra_work, (void *)pool)))
 			applog(LOG_ERR, "Failed to create get_work_thread");
 	}
@@ -2114,7 +2118,9 @@ static bool workio_get_work(struct workio_cmd *wc)
 	ret = tq_push(pool->getwork_q, wc);
 
 	mutex_lock(&pool->pool_lock);
-	--pool->get_wait;
+	--pool->gs_wait;
+	if (recruit)
+		pool->gs_wait += 5;
 	mutex_unlock(&pool->pool_lock);
 
 	return ret;
@@ -2294,17 +2300,21 @@ static void *submit_extra_work(void *userdata)
  * any size hardware */
 static bool workio_submit_work(struct workio_cmd *wc)
 {
+	bool ret, recruit = false;
 	pthread_t submit_thread;
 	struct pool *pool;
-	bool ret;
 	int sw;
 
 	pool = wc->u.work->pool;
 	mutex_lock(&pool->pool_lock);
-	sw = ++pool->submit_wait;
+	sw = ++pool->gs_wait;
+	if (sw > 5) {
+		recruit = true;
+		pool->gs_wait -= 5;
+	}
 	mutex_unlock(&pool->pool_lock);
 
-	if (sw > 5) {
+	if (recruit) {
 		if (unlikely(pthread_create(&submit_thread, NULL, submit_extra_work, (void *)pool)))
 			applog(LOG_ERR, "Failed to create submit_work_thread");
 	}
@@ -2312,7 +2322,9 @@ static bool workio_submit_work(struct workio_cmd *wc)
 	ret = tq_push(pool->submit_q, wc);
 
 	mutex_lock(&pool->pool_lock);
-	--pool->submit_wait;
+	--pool->gs_wait;
+	if (recruit)
+		pool->gs_wait += 5;
 	mutex_unlock(&pool->pool_lock);
 
 	return ret;
