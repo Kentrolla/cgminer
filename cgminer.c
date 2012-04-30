@@ -2022,53 +2022,73 @@ static void *get_work_thread(void *userdata)
 	return NULL;
 }
 
+/* Recruit extra get threads and discard if they are idle for 60 seconds */
 static void *get_extra_work(void *userdata)
 {
-	struct workio_cmd *wc = (struct workio_cmd *)userdata;
-	struct work *ret_work = make_work();;
-	CURL *curl = curl_easy_init();
-	int failures = 0;
+	struct pool *pool = (struct pool *)userdata;
+	struct timespec abstime;
+	struct workio_cmd *wc;
+	struct timeval now;
+	CURL *curl;
 
 	pthread_detach(pthread_self());
 
-	applog(LOG_DEBUG, "Creating extra get work thread");
+	applog(LOG_DEBUG, "Recruiting extra getwork");
+	curl = curl_easy_init();
+	if (unlikely(!curl))
+		quit(1, "Failed to initialise extra getwork CURL");
 
-	if (wc->thr)
-		ret_work->thr = wc->thr;
-	else
-		ret_work->thr = NULL;
+	gettimeofday(&now, NULL);
+	abstime.tv_nsec = now.tv_usec * 1000;
+	abstime.tv_sec = now.tv_sec + 60;
 
-	ret_work->pool = select_pool(wc->lagging);
+	while ((wc = tq_pop(pool->getwork_q, &abstime)) != NULL) {
+		struct work *ret_work;
+		int failures = 0;
 
-	/* obtain new work from bitcoin via JSON-RPC */
-	while (!get_upstream_work(ret_work, curl)) {
-		if (unlikely((opt_retries >= 0) && (++failures > opt_retries))) {
-			applog(LOG_ERR, "json_rpc_call failed, terminating workio thread");
-			free_work(ret_work);
-			kill_work();
-			goto out;
+		ret_work = make_work();
+
+		if (wc->thr)
+			ret_work->thr = wc->thr;
+		else
+			ret_work->thr = NULL;
+
+		ret_work->pool = pool;
+
+		/* obtain new work from bitcoin via JSON-RPC */
+		while (!get_upstream_work(ret_work, curl)) {
+			if (unlikely((opt_retries >= 0) && (++failures > opt_retries))) {
+				applog(LOG_ERR, "json_rpc_call failed, terminating workio thread");
+				free_work(ret_work);
+				kill_work();
+				break;
+			}
+
+			/* pause, then restart work-request loop */
+			applog(LOG_DEBUG, "json_rpc_call failed on get work, retry after %d seconds",
+				fail_pause);
+			sleep(fail_pause);
+			fail_pause += opt_fail_pause;
 		}
+		fail_pause = opt_fail_pause;
 
-		/* pause, then restart work-request loop */
-		applog(LOG_DEBUG, "json_rpc_call failed on get work, retry after %d seconds",
-			fail_pause);
-		sleep(fail_pause);
-		fail_pause += opt_fail_pause;
+		applog(LOG_DEBUG, "Pushing work to requesting thread");
+
+		/* send work to requesting thread */
+		if (unlikely(!tq_push(thr_info[stage_thr_id].q, ret_work))) {
+			applog(LOG_ERR, "Failed to tq_push work in workio_get_work");
+			kill_work();
+			free_work(ret_work);
+		}
+		workio_cmd_free(wc);
+
+		gettimeofday(&now, NULL);
+		abstime.tv_nsec = now.tv_usec * 1000;
+		abstime.tv_sec = now.tv_sec + 60;
 	}
-	fail_pause = opt_fail_pause;
 
-	applog(LOG_DEBUG, "Pushing work to requesting thread");
-
-	/* send work to requesting thread */
-	if (unlikely(!tq_push(thr_info[stage_thr_id].q, ret_work))) {
-		applog(LOG_ERR, "Failed to tq_push work in workio_get_work");
-		kill_work();
-		free_work(ret_work);
-	}
-
-out:
-	workio_cmd_free(wc);
 	curl_easy_cleanup(curl);
+	applog(LOG_DEBUG, "Killing off extra getwork");
 	return NULL;
 }
 
@@ -2080,14 +2100,14 @@ static bool workio_get_work(struct workio_cmd *wc)
 	struct pool *pool = select_pool(wc->lagging);
 	pthread_t get_thread;
 
-	if (list_empty(&pool->getwork_q->q))
-		return tq_push(pool->getwork_q, wc);
-
-	if (unlikely(pthread_create(&get_thread, NULL, get_extra_work, (void *)wc))) {
-		applog(LOG_ERR, "Failed to create get_work_thread");
-		return false;
+	if (!list_empty(&pool->getwork_q->q)) {
+		if (unlikely(pthread_create(&get_thread, NULL, get_extra_work, (void *)pool))) {
+			applog(LOG_ERR, "Failed to create get_work_thread");
+			return false;
+		}
 	}
-	return true;
+
+	return tq_push(pool->getwork_q, wc);
 }
 
 static bool stale_work(struct work *work, bool share)
@@ -2183,56 +2203,78 @@ static void *submit_work_thread(void *userdata)
 	return NULL;
 }
 
+/* Recruit extra submit threads and discard if they are idle for 60 seconds */
 static void *submit_extra_work(void *userdata)
 {
-	struct workio_cmd *wc = (struct workio_cmd *)userdata;
-	struct work *work = wc->u.work;
-	struct pool *pool = work->pool;
-	CURL *curl = curl_easy_init();
-	int failures = 0;
+	struct pool *pool = (struct pool *)userdata;
+	struct timespec abstime;
+	struct workio_cmd *wc;
+	struct timeval now;
+	CURL *curl;
 
 	pthread_detach(pthread_self());
 
-	applog(LOG_DEBUG, "Creating extra submit work thread");
+	applog(LOG_DEBUG, "Recruiting extra submit work");
+	curl = curl_easy_init();
+	if (unlikely(!curl))
+		quit(1, "Failed to initialise extra submit work CURL");
 
-	if (stale_work(work, true)) {
-		if (opt_submit_stale)
-			applog(LOG_NOTICE, "Stale share detected, submitting as user requested");
-		else if (pool->submit_old)
-			applog(LOG_NOTICE, "Stale share detected, submitting as pool requested");
-		else {
-			applog(LOG_NOTICE, "Stale share detected, discarding");
-			sharelog("discard", work);
-			total_stale++;
-			pool->stale_shares++;
-			goto out;
+	gettimeofday(&now, NULL);
+	abstime.tv_nsec = now.tv_usec * 1000;
+	abstime.tv_sec = now.tv_sec + 60;
+
+	while ((wc = tq_pop(pool->submit_q, &abstime)) != NULL) {
+		struct work *work = wc->u.work;
+		int failures = 0;
+
+		if (stale_work(work, true)) {
+			if (pool->submit_old)
+				applog(LOG_NOTICE, "Stale share, submitting as pool %d requested",
+				       pool->pool_no);
+			else if (opt_submit_stale)
+				applog(LOG_NOTICE, "Stale share from pool %d, submitting as user requested",
+					pool->pool_no);
+			else {
+				applog(LOG_NOTICE, "Stale share from pool %d, discarding",
+					pool->pool_no);
+				sharelog("discard", work);
+				total_stale++;
+				pool->stale_shares++;
+				workio_cmd_free(wc);
+				continue;
+			}
 		}
+
+		/* submit solution to bitcoin via JSON-RPC */
+		while (!submit_upstream_work(work, curl)) {
+			if (!opt_submit_stale && stale_work(work, true) && !pool->submit_old) {
+				applog(LOG_NOTICE, "Stale share detected on submit retry, discarding");
+				total_stale++;
+				pool->stale_shares++;
+				break;
+			}
+			if (unlikely((opt_retries >= 0) && (++failures > opt_retries))) {
+				applog(LOG_ERR, "Failed %d retries ...terminating workio thread", opt_retries);
+				kill_work();
+				break;
+			}
+
+			/* pause, then restart work-request loop */
+			applog(LOG_INFO, "json_rpc_call failed on submit_work, retry after %d seconds",
+				fail_pause);
+			sleep(fail_pause);
+			fail_pause += opt_fail_pause;
+		}
+		fail_pause = opt_fail_pause;
+		workio_cmd_free(wc);
+
+		gettimeofday(&now, NULL);
+		abstime.tv_nsec = now.tv_usec * 1000;
+		abstime.tv_sec = now.tv_sec + 60;
 	}
 
-	/* submit solution to bitcoin via JSON-RPC */
-	while (!submit_upstream_work(work, curl)) {
-		if (!opt_submit_stale && stale_work(work, true)) {
-			applog(LOG_NOTICE, "Stale share detected, discarding");
-			total_stale++;
-			pool->stale_shares++;
-			break;
-		}
-		if (unlikely((opt_retries >= 0) && (++failures > opt_retries))) {
-			applog(LOG_ERR, "Failed %d retries ...terminating workio thread", opt_retries);
-			kill_work();
-			break;
-		}
-
-		/* pause, then restart work-request loop */
-		applog(LOG_INFO, "json_rpc_call failed on submit_work, retry after %d seconds",
-			fail_pause);
-		sleep(fail_pause);
-		fail_pause += opt_fail_pause;
-	}
-	fail_pause = opt_fail_pause;
-out:
-	workio_cmd_free(wc);
 	curl_easy_cleanup(curl);
+	applog(LOG_DEBUG, "Killing off extra submit work");
 	return NULL;
 }
 
@@ -2244,14 +2286,14 @@ static bool workio_submit_work(struct workio_cmd *wc)
 {
 	pthread_t submit_thread;
 
-	if (list_empty(&wc->u.work->pool->submit_q->q))
-		return tq_push(wc->u.work->pool->submit_q, wc);
-
-	if (unlikely(pthread_create(&submit_thread, NULL, submit_extra_work, (void *)wc))) {
-		applog(LOG_ERR, "Failed to create submit_work_thread");
-		return false;
+	if (!list_empty(&wc->u.work->pool->submit_q->q)) {
+		if (unlikely(pthread_create(&submit_thread, NULL, submit_extra_work, (void *)wc->u.work->pool))) {
+			applog(LOG_ERR, "Failed to create submit_work_thread");
+			return false;
+		}
 	}
-	return true;
+
+	return tq_push(wc->u.work->pool->submit_q, wc);
 }
 
 /* Find the pool that currently has the highest priority */
