@@ -2591,7 +2591,7 @@ static void test_work_current(struct work *work)
 			applog(LOG_NOTICE, "LONGPOLL from pool %d detected new block",
 			       work->pool->pool_no);
 			work->longpoll = false;
-			if (pool_strategy == POOL_HOP && work->pool != current_pool())
+			if (pool_strategy == POOL_HOP && work->pool->lp_url && work->pool != current_pool())
 				switch_pools(work->pool);
 		} else if (have_longpoll)
 			applog(LOG_NOTICE, "New block detected on network before longpoll");
