@@ -1982,7 +1982,7 @@ static struct curl_ent *pop_curl_entry(struct pool *pool)
 static void push_curl_entry(struct curl_ent *ce, struct pool *pool)
 {
 	mutex_lock(&pool->pool_lock);
-	list_add(&ce->node, &pool->curlring);
+	list_add_tail(&ce->node, &pool->curlring);
 	gettimeofday(&ce->tv, NULL);
 	mutex_unlock(&pool->pool_lock);
 }
