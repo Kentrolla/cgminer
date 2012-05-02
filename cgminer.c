@@ -1981,10 +1981,12 @@ static struct curl_ent *pop_curl_entry(struct pool *pool)
 	mutex_lock(&pool->pool_lock);
 	if (!pool->curls)
 		recruit_curl(pool);
-	else if ((pool->submit_fail || opt_delaynet) && pool->curls > 4)
-		pthread_cond_wait(&pool->cr_cond, &pool->pool_lock);
-	else if (list_empty(&pool->curlring))
-		recruit_curl(pool);
+	else if (list_empty(&pool->curlring)) {
+		if ((pool->submit_fail || opt_delaynet) && pool->curls > 4)
+			pthread_cond_wait(&pool->cr_cond, &pool->pool_lock);
+		else
+			recruit_curl(pool);
+	}
 	ce = list_entry(pool->curlring.next, struct curl_ent, node);
 	list_del(&ce->node);
 	mutex_unlock(&pool->pool_lock);;
