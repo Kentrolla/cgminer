@@ -3982,8 +3982,7 @@ void reinit_device(struct cgpu_info *cgpu)
 
 static struct timeval rotate_tv;
 
-/* We reap curls if they are unused for over 5 minutes. Curl handles only
- * maintain open connections for that duration. */
+/* We reap curls if they are unused for over a minute */
 static void reap_curl(struct pool *pool)
 {
 	struct curl_ent *ent, *iter;
@@ -3992,7 +3991,7 @@ static void reap_curl(struct pool *pool)
 	gettimeofday(&now, NULL);
 	mutex_lock(&pool->pool_lock);
 	list_for_each_entry_safe(ent, iter, &pool->curlring, node) {
-		if (now.tv_sec - ent->tv.tv_sec > 300) {
+		if (now.tv_sec - ent->tv.tv_sec > 60) {
 			applog(LOG_DEBUG, "Reaped curl from pool %d", pool->pool_no);
 			list_del(&ent->node);
 			curl_easy_cleanup(ent->curl);
