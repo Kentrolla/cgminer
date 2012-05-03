@@ -1989,7 +1989,7 @@ static struct curl_ent *pop_curl_entry(struct pool *pool)
 	}
 	ce = list_entry(pool->curlring.next, struct curl_ent, node);
 	list_del(&ce->node);
-	mutex_unlock(&pool->pool_lock);;
+	mutex_unlock(&pool->pool_lock);
 
 	return ce;
 }
@@ -1999,7 +1999,7 @@ static void push_curl_entry(struct curl_ent *ce, struct pool *pool)
 	mutex_lock(&pool->pool_lock);
 	list_add_tail(&ce->node, &pool->curlring);
 	gettimeofday(&ce->tv, NULL);
-	pthread_cond_signal(&pool->cr_cond);;
+	pthread_cond_signal(&pool->cr_cond);
 	mutex_unlock(&pool->pool_lock);
 }
 
