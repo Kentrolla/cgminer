@@ -588,8 +588,6 @@ extern int add_pool_details(bool live, char *url, char *user, char *pass);
 
 extern struct list_head scan_devices;
 extern int nDevs;
-extern int opt_n_threads;
-extern int num_processors;
 extern int hw_errors;
 extern bool use_syslog;
 extern struct thr_info *thr_info;
@@ -598,7 +596,6 @@ extern struct cgpu_info gpus[MAX_GPUDEVICES];
 extern int gpu_threads;
 extern double total_secs;
 extern int mining_threads;
-extern struct cgpu_info *cpus;
 extern int total_devices;
 extern struct cgpu_info *devices[];
 extern int total_pools;

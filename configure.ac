@@ -114,17 +114,6 @@ if test "x$ATISTREAMSDKROOT" != x; then
 	OPENCL_LIBS="-L$ATISTREAMSDKROOT/lib/$ATI_STREAM_ARCH_DIR $OPENCL_LIBS"
 fi
 
-cpumining="no"
-
-AC_ARG_ENABLE([cpumining],
-	[AC_HELP_STRING([--enable-cpumining],[Build with cpu mining support(default disabled)])],
-	[cpumining=$enableval]
-	)
-if test "x$cpumining" = xyes; then
-	AC_DEFINE_UNQUOTED([WANT_CPUMINE], [1], [Enable CPUMINING])
-fi
-AM_CONDITIONAL([HAS_CPUMINE], [test x$cpumining = xyes])
-
 opencl="yes"
 
 AC_ARG_ENABLE([opencl],
@@ -389,8 +378,6 @@ AC_CONFIG_FILES([
 	Makefile
 	compat/Makefile
 	compat/jansson/Makefile
-	x86_64/Makefile
-	x86_32/Makefile
 	ccan/Makefile
 	lib/Makefile
 	])
@@ -415,13 +402,13 @@ if test "x$opencl" != xno; then
 		echo "  OpenCL...............: FOUND. GPU mining support enabled"
 	else
 		echo "  OpenCL...............: NOT FOUND. GPU mining support DISABLED"
-		if test "x$cpumining$bitforce$icarus$ztex" = xnononono; then
+		if test "x$bitforce$icarus$ztex" = xnononono; then
 			AC_MSG_ERROR([No mining configured in])
 		fi
 	fi
 else
 	echo "  OpenCL...............: Detection overrided. GPU mining support DISABLED"
-	if test "x$cpumining$bitforce$icarus$ztex" = xnononono; then
+	if test "x$bitforce$icarus$ztex" = xnononono; then
 		AC_MSG_ERROR([No mining configured in])
 	fi
 fi
@@ -457,12 +444,6 @@ fi
 
 if test "x$bitforce" != xno; then
 	echo "  libudev.detection....: $libudev"
-fi
-
-if test "x$cpumining" = xyes; then
-	echo
-	echo "  CPU Mining...........: Enabled"
-	echo "  ASM.(for CPU mining).: $has_yasm"
 fi
 
 echo

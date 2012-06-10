@@ -25,7 +25,6 @@
 
 #include "compat.h"
 #include "miner.h"
-#include "driver-cpu.h" /* for algo_names[], TODO: re-factor dependency */
 
 #if defined(unix) || defined(__APPLE__)
 	#include <errno.h>
@@ -138,7 +137,7 @@
 #endif
 
 // Big enough for largest API request
-//  though a PC with 100s of PGAs/CPUs may exceed the size ...
+//  though a PC with 100s of PGAs may exceed the size ...
 // Current code assumes it can socket send this size also
 #define MYBUFSIZ	65432	// TODO: intercept before it's exceeded
 
@@ -188,9 +187,6 @@ static const char *DEVICECODE = ""
 #ifdef USE_ZTEX
 			"ZTX "
 #endif
-#ifdef WANT_CPUMINE
-			"CPU "
-#endif
 			"";
 
 static const char *OSINFO =
@@ -224,13 +220,8 @@ static const char *OSINFO =
 #define _PGA		"PGA"
 #endif
 
-#ifdef WANT_CPUMINE
-#define _CPU		"CPU"
-#endif
-
 #define _GPUS		"GPUS"
 #define _PGAS		"PGAS"
-#define _CPUS		"CPUS"
 #define _NOTIFY		"NOTIFY"
 #define _DEVDETAILS	"DEVDETAILS"
 #define _BYE		"BYE"
@@ -257,13 +248,8 @@ static const char ISJSON = '{';
 #define JSON_PGA	JSON1 _PGA JSON2
 #endif
 
-#ifdef WANT_CPUMINE
-#define JSON_CPU	JSON1 _CPU JSON2
-#endif
-
 #define JSON_GPUS	JSON1 _GPUS JSON2
 #define JSON_PGAS	JSON1 _PGAS JSON2
-#define JSON_CPUS	JSON1 _CPUS JSON2
 #define JSON_NOTIFY	JSON1 _NOTIFY JSON2
 #define JSON_DEVDETAILS	JSON1 _DEVDETAILS JSON2
 #define JSON_BYE	JSON1 _BYE JSON1
@@ -292,14 +278,8 @@ static const char *JSON_PARAMETER = "parameter";
 #define MSG_MISID 15
 #define MSG_GPUDEV 17
 
-#ifdef WANT_CPUMINE
-#define MSG_CPUNON 16
-#define MSG_CPUDEV 18
-#define MSG_INVCPU 19
-#endif
-
 #define MSG_NUMGPU 20
-#define MSG_NUMCPU 21
+
 #define MSG_VERSION 22
 #define MSG_INVJSON 23
 #define MSG_MISCMD 24
@@ -369,10 +349,8 @@ enum code_severity {
 enum code_parameters {
 	PARAM_GPU,
 	PARAM_PGA,
-	PARAM_CPU,
 	PARAM_GPUMAX,
 	PARAM_PGAMAX,
-	PARAM_CPUMAX,
 	PARAM_PMAX,
 	PARAM_POOLMAX,
 
@@ -405,17 +383,11 @@ struct CODES {
 #if defined(USE_BITFORCE) || defined(USE_ICARUS) || defined(USE_ZTEX)
 						" - %d PGA(s)"
 #endif
-#ifdef WANT_CPUMINE
-						" - %d CPU(s)"
-#endif
  },
 
  { SEVERITY_ERR,   MSG_NODEVS,	PARAM_NONE,	"No GPUs"
 #if defined(USE_BITFORCE) || defined(USE_ICARUS) || defined(USE_ZTEX)
 						"/PGAs"
-#endif
-#ifdef WANT_CPUMINE
-						"/CPUs"
 #endif
  },
 
@@ -435,14 +407,8 @@ struct CODES {
  { SEVERITY_INFO,  MSG_PGADIS,	PARAM_PGA,	"PGA %d set disable flag" },
  { SEVERITY_ERR,   MSG_PGAUNW,	PARAM_PGA,	"PGA %d is not flagged WELL, cannot enable" },
 #endif
-#ifdef WANT_CPUMINE
- { SEVERITY_ERR,   MSG_CPUNON,	PARAM_NONE,	"No CPUs" },
- { SEVERITY_SUCC,  MSG_CPUDEV,	PARAM_CPU,	"CPU%d" },
- { SEVERITY_ERR,   MSG_INVCPU,	PARAM_CPUMAX,	"Invalid CPU id %d - range is 0 - %d" },
-#endif
  { SEVERITY_SUCC,  MSG_NUMGPU,	PARAM_NONE,	"GPU count" },
  { SEVERITY_SUCC,  MSG_NUMPGA,	PARAM_NONE,	"PGA count" },
- { SEVERITY_SUCC,  MSG_NUMCPU,	PARAM_NONE,	"CPU count" },
  { SEVERITY_SUCC,  MSG_VERSION,	PARAM_NONE,	"CGMiner versions" },
  { SEVERITY_ERR,   MSG_INVJSON,	PARAM_NONE,	"Invalid JSON" },
  { SEVERITY_ERR,   MSG_MISCMD,	PARAM_CMD,	"Missing JSON '%s'" },
@@ -639,9 +605,6 @@ static char *message(int messageid, int paramid, char *param2, bool isjson)
 #if defined(USE_BITFORCE) || defined(USE_ICARUS) || defined(USE_ZTEX)
 	int pga;
 #endif
-#ifdef WANT_CPUMINE
-	int cpu;
-#endif
 	int i;
 
 	for (i = 0; codes[i].severity != SEVERITY_FAIL; i++) {
@@ -672,9 +635,6 @@ static char *message(int messageid, int paramid, char *param2, bool isjson)
 			switch(codes[i].params) {
 			case PARAM_GPU:
 			case PARAM_PGA:
-			case PARAM_CPU:
-				sprintf(ptr, codes[i].description, paramid);
-				break;
 			case PARAM_POOL:
 				sprintf(ptr, codes[i].description, paramid, pools[paramid]->rpc_url);
 				break;
@@ -687,15 +647,6 @@ static char *message(int messageid, int paramid, char *param2, bool isjson)
 				sprintf(ptr, codes[i].description, paramid, pga - 1);
 				break;
 #endif
-#ifdef WANT_CPUMINE
-			case PARAM_CPUMAX:
-				if (opt_n_threads > 0)
-					cpu = num_processors;
-				else
-					cpu = 0;
-				sprintf(ptr, codes[i].description, paramid, cpu - 1);
-				break;
-#endif
 			case PARAM_PMAX:
 				sprintf(ptr, codes[i].description, total_pools);
 				break;
@@ -706,19 +657,10 @@ static char *message(int messageid, int paramid, char *param2, bool isjson)
 #if defined(USE_BITFORCE) || defined(USE_ICARUS) || defined(USE_ZTEX)
 				pga = numpgas();
 #endif
-#ifdef WANT_CPUMINE
-				if (opt_n_threads > 0)
-					cpu = num_processors;
-				else
-					cpu = 0;
-#endif
 
 				sprintf(ptr, codes[i].description, nDevs
 #if defined(USE_BITFORCE) || defined(USE_ICARUS) || defined(USE_ZTEX)
 					, pga
-#endif
-#ifdef WANT_CPUMINE
-					, cpu
 #endif
 					);
 				break;
@@ -768,7 +710,6 @@ static void minerconfig(__maybe_unused SOCKETTYPE c, __maybe_unused char *param,
 {
 	char buf[TMPBUFSIZ];
 	int pgacount = 0;
-	int cpucount = 0;
 	char *adlinuse = (char *)NO;
 #ifdef HAVE_ADL
 	const char *adl = YES;
@@ -788,17 +729,13 @@ static void minerconfig(__maybe_unused SOCKETTYPE c, __maybe_unused char *param,
 	pgacount = numpgas();
 #endif
 
-#ifdef WANT_CPUMINE
-	cpucount = opt_n_threads > 0 ? num_processors : 0;
-#endif
-
 	strcpy(io_buffer, message(MSG_MINECON, 0, NULL, isjson));
 
 	sprintf(buf, isjson
-		? "," JSON_MINECON "{\"GPU Count\":%d,\"PGA Count\":%d,\"CPU Count\":%d,\"Pool Count\":%d,\"ADL\":\"%s\",\"ADL in use\":\"%s\",\"Strategy\":\"%s\",\"Log Interval\":%d,\"Device Code\":\"%s\",\"OS\":\"%s\"}" JSON_CLOSE
-		: _MINECON ",GPU Count=%d,PGA Count=%d,CPU Count=%d,Pool Count=%d,ADL=%s,ADL in use=%s,Strategy=%s,Log Interval=%d,Device Code=%s,OS=%s" SEPSTR,
+		? "," JSON_MINECON "{\"GPU Count\":%d,\"PGA Count\":%d,\"Pool Count\":%d,\"ADL\":\"%s\",\"ADL in use\":\"%s\",\"Strategy\":\"%s\",\"Log Interval\":%d,\"Device Code\":\"%s\",\"OS\":\"%s\"}" JSON_CLOSE
+		: _MINECON ",GPU Count=%d,PGA Count=%d,Pool Count=%d,ADL=%s,ADL in use=%s,Strategy=%s,Log Interval=%d,Device Code=%s,OS=%s" SEPSTR,
 
-		nDevs, pgacount, cpucount, total_pools, adl, adlinuse,
+		nDevs, pgacount, total_pools, adl, adlinuse,
 		strategies[pool_strategy].s, opt_log_interval, DEVICECODE, OSINFO);
 
 	strcat(io_buffer, buf);
@@ -908,31 +845,6 @@ static void pgastatus(int pga, bool isjson)
 }
 #endif
 
-#ifdef WANT_CPUMINE
-static void cpustatus(int cpu, bool isjson)
-{
-	char buf[TMPBUFSIZ];
-
-	if (opt_n_threads > 0 && cpu >= 0 && cpu < num_processors) {
-		struct cgpu_info *cgpu = &cpus[cpu];
-
-		cgpu->utility = cgpu->accepted / ( total_secs ? total_secs : 1 ) * 60;
-
-		sprintf(buf, isjson
-			? "{\"CPU\":%d,\"MHS av\":%.2f,\"MHS %ds\":%.2f,\"Accepted\":%d,\"Rejected\":%d,\"Utility\":%.2f,\"Last Share Pool\":%d,\"Last Share Time\":%lu,\"Total MH\":%.4f}"
-			: "CPU=%d,MHS av=%.2f,MHS %ds=%.2f,Accepted=%d,Rejected=%d,Utility=%.2f,Last Share Pool=%d,Last Share Time=%lu,Total MH=%.4f" SEPSTR,
-			cpu, cgpu->total_mhashes / total_secs,
-			opt_log_interval, cgpu->rolling,
-			cgpu->accepted, cgpu->rejected,
-			cgpu->utility,
-			((unsigned long)(cgpu->last_share_pool_time) > 0) ? cgpu->last_share_pool : -1,
-			(unsigned long)(cgpu->last_share_pool_time), cgpu->total_mhashes);
-
-		strcat(io_buffer, buf);
-	}
-}
-#endif
-
 static void devstatus(__maybe_unused SOCKETTYPE c, __maybe_unused char *param, bool isjson)
 {
 	int devcount = 0;
@@ -943,7 +855,7 @@ static void devstatus(__maybe_unused SOCKETTYPE c, __maybe_unused char *param, b
 	numpga = numpgas();
 #endif
 
-	if (nDevs == 0 && opt_n_threads == 0 && numpga == 0) {
+	if (nDevs == 0 && numpga == 0) {
 		strcpy(io_buffer, message(MSG_NODEVS, 0, NULL, isjson));
 		return;
 	}
@@ -971,18 +883,6 @@ static void devstatus(__maybe_unused SOCKETTYPE c, __maybe_unused char *param, b
 				strcat(io_buffer, COMMA);
 
 			pgastatus(i, isjson);
-
-			devcount++;
-		}
-#endif
-
-#ifdef WANT_CPUMINE
-	if (opt_n_threads > 0)
-		for (i = 0; i < num_processors; i++) {
-			if (isjson && devcount > 0)
-				strcat(io_buffer, COMMA);
-
-			cpustatus(i, isjson);
 
 			devcount++;
 		}
@@ -1154,41 +1054,6 @@ static void pgadisable(__maybe_unused SOCKETTYPE c, char *param, bool isjson)
 }
 #endif
 
-#ifdef WANT_CPUMINE
-static void cpudev(__maybe_unused SOCKETTYPE c, char *param, bool isjson)
-{
-	int id;
-
-	if (opt_n_threads == 0) {
-		strcpy(io_buffer, message(MSG_CPUNON, 0, NULL, isjson));
-		return;
-	}
-
-	if (param == NULL || *param == '\0') {
-		strcpy(io_buffer, message(MSG_MISID, 0, NULL, isjson));
-		return;
-	}
-
-	id = atoi(param);
-	if (id < 0 || id >= num_processors) {
-		strcpy(io_buffer, message(MSG_INVCPU, id, NULL, isjson));
-		return;
-	}
-
-	strcpy(io_buffer, message(MSG_CPUDEV, id, NULL, isjson));
-
-	if (isjson) {
-		strcat(io_buffer, COMMA);
-		strcat(io_buffer, JSON_CPU);
-	}
-
-	cpustatus(id, isjson);
-
-	if (isjson)
-		strcat(io_buffer, JSON_CLOSE);
-}
-#endif
-
 static void poolstatus(__maybe_unused SOCKETTYPE c, __maybe_unused char *param, bool isjson)
 {
 	char buf[TMPBUFSIZ];
@@ -1270,25 +1135,9 @@ static void summary(__maybe_unused SOCKETTYPE c, __maybe_unused char *param, boo
 {
 	double utility, mhs;
 
-#ifdef WANT_CPUMINE
-	char *algo = (char *)(algo_names[opt_algo]);
-	if (algo == NULL)
-		algo = "(null)";
-#endif
-
 	utility = total_accepted / ( total_secs ? total_secs : 1 ) * 60;
 	mhs = total_mhashes_done / total_secs;
 
-#ifdef WANT_CPUMINE
-	sprintf(io_buffer, isjson
-		? "%s," JSON_SUMMARY "{\"Elapsed\":%.0f,\"Algorithm\":\"%s\",\"MHS av\":%.2f,\"Found Blocks\":%d,\"Getworks\":%d,\"Accepted\":%d,\"Rejected\":%d,\"Hardware Errors\":%d,\"Utility\":%.2f,\"Discarded\":%d,\"Stale\":%d,\"Get Failures\":%d,\"Local Work\":%u,\"Remote Failures\":%u,\"Network Blocks\":%u,\"Total MH\":%.4f}" JSON_CLOSE
-		: "%s" _SUMMARY ",Elapsed=%.0f,Algorithm=%s,MHS av=%.2f,Found Blocks=%d,Getworks=%d,Accepted=%d,Rejected=%d,Hardware Errors=%d,Utility=%.2f,Discarded=%d,Stale=%d,Get Failures=%d,Local Work=%u,Remote Failures=%u,Network Blocks=%u,Total MH=%.4f" SEPSTR,
-		message(MSG_SUMM, 0, NULL, isjson),
-		total_secs, algo, mhs, found_blocks,
-		total_getworks, total_accepted, total_rejected,
-		hw_errors, utility, total_discarded, total_stale,
-		total_go, local_work, total_ro, new_blocks, total_mhashes_done);
-#else
 	sprintf(io_buffer, isjson
 		? "%s," JSON_SUMMARY "{\"Elapsed\":%.0f,\"MHS av\":%.2f,\"Found Blocks\":%d,\"Getworks\":%d,\"Accepted\":%d,\"Rejected\":%d,\"Hardware Errors\":%d,\"Utility\":%.2f,\"Discarded\":%d,\"Stale\":%d,\"Get Failures\":%d,\"Local Work\":%u,\"Remote Failures\":%u,\"Network Blocks\":%u,\"Total MH\":%.4f}" JSON_CLOSE
 		: "%s" _SUMMARY ",Elapsed=%.0f,MHS av=%.2f,Found Blocks=%d,Getworks=%d,Accepted=%d,Rejected=%d,Hardware Errors=%d,Utility=%.2f,Discarded=%d,Stale=%d,Get Failures=%d,Local Work=%u,Remote Failures=%u,Network Blocks=%u,Total MH=%.4f" SEPSTR,
@@ -1297,7 +1146,6 @@ static void summary(__maybe_unused SOCKETTYPE c, __maybe_unused char *param, boo
 		total_getworks, total_accepted, total_rejected,
 		hw_errors, utility, total_discarded, total_stale,
 		total_go, local_work, total_ro, new_blocks, total_mhashes_done);
-#endif
 }
 
 static void gpuenable(__maybe_unused SOCKETTYPE c, char *param, bool isjson)
@@ -1429,25 +1277,6 @@ static void pgacount(__maybe_unused SOCKETTYPE c, __maybe_unused char *param, bo
 	sprintf(buf, isjson
 		? "," JSON_PGAS "{\"Count\":%d}" JSON_CLOSE
 		: _PGAS ",Count=%d" SEPSTR,
-		count);
-
-	strcat(io_buffer, buf);
-}
-
-static void cpucount(__maybe_unused SOCKETTYPE c, __maybe_unused char *param, bool isjson)
-{
-	char buf[TMPBUFSIZ];
-	int count = 0;
-
-#ifdef WANT_CPUMINE
-	count = opt_n_threads > 0 ? num_processors : 0;
-#endif
-
-	strcpy(io_buffer, message(MSG_NUMCPU, 0, NULL, isjson));
-
-	sprintf(buf, isjson
-		? "," JSON_CPUS "{\"Count\":%d}" JSON_CLOSE
-		: _CPUS ",Count=%d" SEPSTR,
 		count);
 
 	strcat(io_buffer, buf);
@@ -2110,12 +1939,8 @@ struct CMDS {
 	{ "pgaenable",		pgaenable,	true },
 	{ "pgadisable",		pgadisable,	true },
 #endif
-#ifdef WANT_CPUMINE
-	{ "cpu",		cpudev,		false },
-#endif
 	{ "gpucount",		gpucount,	false },
 	{ "pgacount",		pgacount,	false },
-	{ "cpucount",		cpucount,	false },
 	{ "switchpool",		switchpool,	true },
 	{ "addpool",		addpool,	true },
 	{ "enablepool",		enablepool,	true },
