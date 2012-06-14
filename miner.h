@@ -313,6 +313,7 @@ struct cgpu_info {
 #endif
 		int device_fd;
 	};
+	pthread_mutex_t		device_mutex;
 
 	enum dev_enable deven;
 	int accepted;
@@ -326,7 +327,7 @@ struct cgpu_info {
 	struct timeval last_message_tv;
 
 	int threads;
-	struct thr_info *thread;
+	struct thr_info **thr;
 
 	unsigned int max_hashes;
 
@@ -335,7 +336,7 @@ struct cgpu_info {
 	int virtual_adl;
 	int intensity;
 	bool dynamic;
-	char *kname;
+	const char *kname;
 #ifdef HAVE_OPENCL
 	cl_uint vwidth;
 	size_t work_size;
@@ -731,6 +732,8 @@ struct work {
 	bool		rolltime;
 	bool		longpoll;
 	bool		stale;
+	bool		mandatory;
+	bool		block;
 
 	unsigned int	work_block;
 	int		id;
@@ -740,6 +743,7 @@ struct work {
 };
 
 extern void get_datestamp(char *, struct timeval *);
+extern bool test_nonce(struct work *work, uint32_t nonce);
 bool submit_nonce(struct thr_info *thr, struct work *work, uint32_t nonce);
 extern void tailsprintf(char *f, const char *fmt, ...);
 extern void wlogprint(const char *f, ...);
