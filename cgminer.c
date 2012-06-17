@@ -3814,9 +3814,6 @@ void *miner_thread(void *userdata)
 	const int thr_id = mythr->id;
 	struct cgpu_info *cgpu = mythr->cgpu;
 	struct device_api *api = cgpu->api;
-	struct cgminer_stats *dev_stats = &(cgpu->cgminer_stats);
-	struct cgminer_stats *pool_stats;
-	struct timeval getwork_start;
 
 	/* Try to cycle approximately 5 times before each log update */
 	const long cycle = opt_log_interval / 5 ? : 1;
@@ -3832,8 +3829,6 @@ void *miner_thread(void *userdata)
 	const bool primary = (!mythr->device_thread) || mythr->primary_thread;
 
 	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
-
-	gettimeofday(&getwork_start, NULL);
 
 	if (api->thread_init && !api->thread_init(mythr)) {
 		cgpu->device_last_not_well = time(NULL);
@@ -3872,39 +3867,7 @@ void *miner_thread(void *userdata)
 		do {
 			gettimeofday(&tv_start, NULL);
 
-			timersub(&tv_start, &getwork_start, &getwork_start);
-
-			timeradd(&getwork_start,
-				&(dev_stats->getwork_wait),
-				&(dev_stats->getwork_wait));
-			if (timercmp(&getwork_start, &(dev_stats->getwork_wait_max), >)) {
-				dev_stats->getwork_wait_max.tv_sec = getwork_start.tv_sec;
-				dev_stats->getwork_wait_max.tv_usec = getwork_start.tv_usec;
-			}
-			if (timercmp(&getwork_start, &(dev_stats->getwork_wait_min), <)) {
-				dev_stats->getwork_wait_min.tv_sec = getwork_start.tv_sec;
-				dev_stats->getwork_wait_min.tv_usec = getwork_start.tv_usec;
-			}
-			dev_stats->getwork_calls++;
-
-			pool_stats = &(work->pool->cgminer_stats);
-
-			timeradd(&getwork_start,
-				&(pool_stats->getwork_wait),
-				&(pool_stats->getwork_wait));
-			if (timercmp(&getwork_start, &(pool_stats->getwork_wait_max), >)) {
-				pool_stats->getwork_wait_max.tv_sec = getwork_start.tv_sec;
-				pool_stats->getwork_wait_max.tv_usec = getwork_start.tv_usec;
-			}
-			if (timercmp(&getwork_start, &(pool_stats->getwork_wait_min), <)) {
-				pool_stats->getwork_wait_min.tv_sec = getwork_start.tv_sec;
-				pool_stats->getwork_wait_min.tv_usec = getwork_start.tv_usec;
-			}
-			pool_stats->getwork_calls++;
-
 			hashes = api->scanhash(mythr, work, work->blk.nonce + max_nonce);
-
-			gettimeofday(&getwork_start, NULL);
 
 			if (unlikely(work_restart[thr_id].restart)) {
 
