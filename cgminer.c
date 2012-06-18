@@ -3849,7 +3849,7 @@ void *miner_thread(void *userdata)
 	int64_t (*job_get_results)(struct thr_info*, struct work*) = api->job_get_results ?: api->job_process_results;
 
 	/* Try to cycle approximately 5 times before each log update */
-	const long cycle = opt_log_interval / 5 ? : 1;
+	long actualcs;
 	struct timeval tv_start, tv_end, tv_workstart, tv_lastupdate;
 	struct timeval diff, wdiff;
 	uint32_t max_nonce;
@@ -3887,6 +3887,8 @@ void *miner_thread(void *userdata)
 	}
 
 	max_nonce = api->can_limit_work ? api->can_limit_work(mythr) : 0xffffffff;
+
+	const long cyclecs = mythr->results_delayed ? 10 : ((opt_log_interval * 100 / 5) ? : 1);
 
 	thread_reportout(mythr);
 	applog(LOG_DEBUG, "Popping ping in miner thread");
@@ -4032,22 +4034,26 @@ work_restart:
 					}
 
 					skip_hashmeter = !hashes_done;
-					if (unlikely((long)diff.tv_sec < cycle)) {
+					actualcs = (diff.tv_sec * 100) + (diff.tv_usec / 10000);
+					if (unlikely(actualcs < cyclecs)) {
 						if (likely(!mythr->can_limit_work || max_nonce == 0xffffffff))
 							skip_hashmeter = true;
 						else
 						{
+							applog(LOG_DEBUG, "Took only %ldcs for %08llx nonces (goal: %ldcs)", actualcs, hashes, cyclecs);
 							int mult = 1000000 / ((diff.tv_usec + 0x400) / 0x400) + 0x10;
-							mult *= cycle;
+							mult *= cyclecs;
+							mult /= 100;
 							if (max_nonce > (0xffffffff * 0x400) / mult)
 								max_nonce = 0xffffffff;
 							else
 								max_nonce = (hashes * mult) / 0x400;
+							applog(LOG_DEBUG, "New nonce target: %08lx", max_nonce);
 						}
-					} else if (unlikely(diff.tv_sec > cycle) && mythr->can_limit_work) {
-						max_nonce = hashes * cycle / diff.tv_sec;
-					} else if (unlikely(diff.tv_usec > 100000) && mythr->can_limit_work) {
-						max_nonce = hashes * 0x400 / (((cycle * 1000000) + diff.tv_usec) / (cycle * 1000000 / 0x400));
+					} else if (unlikely(actualcs > cyclecs) && mythr->can_limit_work) {
+						applog(LOG_DEBUG, "Took a whole %ldcs for %08llx nonces (goal: %ldcs)", actualcs, hashes, cyclecs);
+						max_nonce = hashes * cyclecs / actualcs;
+						applog(LOG_DEBUG, "New nonce target: %08lx", max_nonce);
 					}
 
 					if (!skip_hashmeter) {
