@@ -101,6 +101,14 @@ static void bitforce_detect()
 	serial_detect_auto(bitforce_api.dname, bitforce_detect_one, bitforce_detect_auto);
 }
 
+struct bitforce_state {
+	const char*job_cmd;
+	unsigned char job_data[61];
+	ssize_t job_data_len;
+
+	char buf[0x100];
+};
+
 static void get_bitforce_statline_before(char *buf, struct cgpu_info *bitforce)
 {
 	float gt = bitforce->temp;
@@ -123,6 +131,15 @@ static bool bitforce_thread_prepare(struct thr_info *thr)
 		return false;
 	}
 
+	struct bitforce_state *state;
+	state = thr->cgpu_data = calloc(1, sizeof(struct bitforce_state));
+	state->job_cmd = "ZDX";
+	memset(&state->job_data[0], '>', 8);
+	memset(&state->job_data[52], '>', 8);
+	state->job_data_len = 60;
+
+	thr->job_idle_usec = 10000;
+
 	bitforce->device_fd = fdDev;
 
 	applog(LOG_INFO, "Opened BitForce on %s", bitforce->device_path);
@@ -132,34 +149,44 @@ static bool bitforce_thread_prepare(struct thr_info *thr)
 	return true;
 }
 
-static uint64_t bitforce_scanhash(struct thr_info *thr, struct work *work, uint64_t __maybe_unused max_nonce)
+static bool bitforce_job_prepare(struct thr_info*thr, struct work*work, uint64_t __maybe_unused max_nonce)
+{
+	struct bitforce_state *state = thr->cgpu_data;
+	memcpy(&state->job_data[8], work->midstate, 32);
+	memcpy(&state->job_data[40], work->data + 64, 12);
+	work->blk.nonce = 0xffffffff;
+	return true;
+}
+
+static void bitforce_job_start(struct thr_info*thr)
 {
 	struct cgpu_info *bitforce = thr->cgpu;
+	struct bitforce_state *state = thr->cgpu_data;
 	int fdDev = bitforce->device_fd;
 
-	char pdevbuf[0x100];
-	unsigned char ob[61] = ">>>>>>>>12345678901234567890123456789012123456789012>>>>>>>>";
-	int i;
-	char *pnoncebuf;
-	char *s;
-	uint32_t nonce;
+	char pdevbuf[0x100], *s;
 
-	BFwrite(fdDev, "ZDX", 3);
+	if (3 != BFwrite2(fdDev, state->job_cmd, 3)) {
+		applog(LOG_ERR, "Error writing to BitForce (%s)", state->job_cmd);
+		return;
+	}
+
 	BFgets(pdevbuf, sizeof(pdevbuf), fdDev);
 	if (unlikely(!pdevbuf[0])) {
 		applog(LOG_ERR, "Error reading from BitForce (ZDX)");
-		return 0;
+		return;
 	}
 	if (unlikely(pdevbuf[0] != 'O' || pdevbuf[1] != 'K')) {
 		applog(LOG_ERR, "BitForce ZDX reports: %s", pdevbuf);
-		return 0;
+		return;
 	}
 
-	memcpy(ob + 8, work->midstate, 32);
-	memcpy(ob + 8 + 32, work->data + 64, 12);
-	BFwrite(fdDev, ob, 60);
+	if (state->job_data_len != BFwrite2(fdDev, state->job_data, state->job_data_len)) {
+		applog(LOG_ERR, "Error writing to BitForce (%s)", state->job_cmd);
+		return;
+	}
 	if (opt_debug) {
-		s = bin2hex(ob + 8, 44);
+		s = bin2hex(&state->job_data[8], 44);
 		applog(LOG_DEBUG, "BitForce block data: %s", s);
 		free(s);
 	}
@@ -167,12 +194,22 @@ static uint64_t bitforce_scanhash(struct thr_info *thr, struct work *work, uint6
 	BFgets(pdevbuf, sizeof(pdevbuf), fdDev);
 	if (unlikely(!pdevbuf[0])) {
 		applog(LOG_ERR, "Error reading from BitForce (block data)");
-		return 0;
+		return;
 	}
 	if (unlikely(pdevbuf[0] != 'O' || pdevbuf[1] != 'K')) {
 		applog(LOG_ERR, "BitForce block data reports: %s", pdevbuf);
-		return 0;
+		return;
 	}
+
+	thr->job_running = true;
+}
+
+static long bitforce_read_temperature(struct thr_info*thr)
+{
+	struct cgpu_info *bitforce = thr->cgpu;
+	int fdDev = bitforce->device_fd;
+
+	char pdevbuf[0x100], *s;
 
 	BFwrite(fdDev, "ZLX", 3);
 	BFgets(pdevbuf, sizeof(pdevbuf), fdDev);
@@ -182,43 +219,50 @@ static uint64_t bitforce_scanhash(struct thr_info *thr, struct work *work, uint6
 	}
 	if ((!strncasecmp(pdevbuf, "TEMP", 4)) && (s = strchr(pdevbuf + 4, ':'))) {
 		float temp = strtof(s + 1, NULL);
-		if (temp > 0) {
-			bitforce->temp = temp;
-			if (temp > bitforce->cutofftemp) {
-				applog(LOG_WARNING, "Hit thermal cutoff limit on %s %d, disabling!", bitforce->api->name, bitforce->device_id);
-				bitforce->deven = DEV_RECOVER;
-
-				bitforce->device_last_not_well = time(NULL);
-				bitforce->device_not_well_reason = REASON_DEV_THERMAL_CUTOFF;
-				bitforce->dev_thermal_cutoff_count++;
-			}
-		}
+		return (long)(temp * 0x100);
 	}
+	return 0;
+}
 
-	usleep(4500000);
-	i = 4500;
-	while (1) {
-		BFwrite(fdDev, "ZFX", 3);
-		BFgets(pdevbuf, sizeof(pdevbuf), fdDev);
-		if (unlikely(!pdevbuf[0])) {
-			applog(LOG_ERR, "Error reading from BitForce (ZFX)");
-			return 0;
-		}
-		if (pdevbuf[0] != 'B')
-		    break;
-		usleep(10000);
-		i += 10;
-	}
-	applog(LOG_DEBUG, "BitForce waited %dms until %s\n", i, pdevbuf);
-	work->blk.nonce = 0xffffffff;
-	if (pdevbuf[2] == '-')
-		return 0xffffffff;
-	else if (strncasecmp(pdevbuf, "NONCE-FOUND", 11)) {
-		applog(LOG_ERR, "BitForce result reports: %s", pdevbuf);
-		return 0;
-	}
+static int64_t bitforce_job_get_results(struct thr_info*thr, __maybe_unused struct work*work)
+{
+	struct cgpu_info *bitforce = thr->cgpu;
+	struct bitforce_state *state = thr->cgpu_data;
+	int fdDev = bitforce->device_fd;
 
-	pnoncebuf = &pdevbuf[12];
+	if (3 != BFwrite2(fdDev, "ZFX", 3)) {
+		applog(LOG_ERR, "Error writing to BitForce (ZFX)");
+		return -2;
+	}
+	BFgets(state->buf, sizeof(state->buf), fdDev);
+	if (unlikely(!state->buf[0])) {
+		applog(LOG_ERR, "Error reading from BitForce (ZFX)");
+		return -2;
+	}
+	if (state->buf[0] == 'B')
+	    return 0;
+
+	applog(LOG_DEBUG, "BitForce waited %dms until %s\n", -1 /*FIXME*/, state->buf);
+	thr->job_running = false;
+	if (unlikely(state->buf[2] == '-'))
+		state->buf[0] = 'B';
+	else
+	if (unlikely(strncasecmp(state->buf, "NONCE-FOUND", 11))) {
+		applog(LOG_ERR, "BitForce result reports: %s", state->buf);
+		return -2;
+	}
+	return 0x100000000;
+}
+
+static int64_t bitforce_job_process_results(struct thr_info*thr, struct work*work)
+{
+	struct bitforce_state *state = thr->cgpu_data;
+
+	if (state->buf[0] == 'B')
+		return 0;  // ignored
+
+	char*pnoncebuf = &state->buf[12];
+	uint32_t nonce;
 
 	while (1) {
 		hex2bin((void*)&nonce, pnoncebuf, 4);
@@ -232,7 +276,9 @@ static uint64_t bitforce_scanhash(struct thr_info *thr, struct work *work, uint6
 		pnoncebuf += 9;
 	}
 
-	return 0xffffffff;
+	state->buf[0] = '\0';
+
+	return 0;  // ignored
 }
 
 struct device_api bitforce_api = {
@@ -241,5 +287,9 @@ struct device_api bitforce_api = {
 	.api_detect = bitforce_detect,
 	.get_statline_before = get_bitforce_statline_before,
 	.thread_prepare = bitforce_thread_prepare,
-	.scanhash = bitforce_scanhash,
+	.read_temperature = bitforce_read_temperature,
+	.job_prepare = bitforce_job_prepare,
+	.job_start = bitforce_job_start,
+	.job_get_results = bitforce_job_get_results,
+	.job_process_results = bitforce_job_process_results,
 };
