@@ -3921,12 +3921,42 @@ bool submit_nonce(struct thr_info *thr, struct work *work, uint32_t nonce)
 
 static inline bool abandon_work(struct work *work, struct timeval *wdiff, uint64_t hashes)
 {
-	if (wdiff->tv_sec > opt_scantime ||
+	bool rv = (wdiff->tv_sec > opt_scantime ||
 	    work->blk.nonce >= MAXTHREADS - hashes ||
 	    hashes >= 0xfffffffe ||
 	    stale_work(work, false))
-		return true;
-	return false;
+	;
+	applog(LOG_DEBUG, "Abandon work id=%08lx/%02x? nonce=%08lx hashes=%08llx - %s", *(long*)&work->data[36], (int)work->data[71], (long)work->blk.nonce, (long long)hashes, rv ? "yes" : "no");
+	return rv;
+}
+
+static bool scanhash_prepare(struct thr_info*thr, struct work*work, uint64_t last_nonce)
+{
+	// Save the nonce range
+	thr->first_nonce = work->blk.nonce;
+	thr->last_nonce = last_nonce;
+	work->blk.nonce = last_nonce;
+	if (last_nonce != 0xffffffff)
+		++work->blk.nonce;
+	thr->job_running = true;
+	return true;
+}
+
+static int64_t scanhash_process(struct thr_info*thr, struct work*work)
+{
+	struct cgpu_info *cgpu = thr->cgpu;
+	const struct device_api *api = cgpu->api;
+
+	uint32_t saved_nonce = work->blk.nonce;
+	uint64_t scanhash_res;
+
+	work->blk.nonce = thr->first_nonce;
+	scanhash_res = api->scanhash(thr, work, thr->last_nonce);
+
+	work->blk.nonce = saved_nonce;
+	thr->job_running = false;
+
+	return scanhash_res ? (int64_t)scanhash_res : -2;
 }
 
 void *miner_thread(void *userdata)
@@ -3934,27 +3964,40 @@ void *miner_thread(void *userdata)
 	struct thr_info *mythr = userdata;
 	const int thr_id = mythr->id;
 	struct cgpu_info *cgpu = mythr->cgpu;
-	struct device_api *api = cgpu->api;
-	struct cgminer_stats *dev_stats = &(cgpu->cgminer_stats);
-	struct cgminer_stats *pool_stats;
-	struct timeval getwork_start;
+	const struct device_api *api = cgpu->api;
+
+	bool (*job_prepare)(struct thr_info*, struct work*, uint64_t) = api->job_prepare;
+	int64_t (*job_get_results)(struct thr_info*, struct work*) = api->job_get_results ?: api->job_process_results;
 
 	/* Try to cycle approximately 5 times before each log update */
-	const long cycle = opt_log_interval / 5 ? : 1;
+	long actualcs;
 	struct timeval tv_start, tv_end, tv_workstart, tv_lastupdate;
-	struct timeval diff, sdiff, wdiff;
-	uint32_t max_nonce = api->can_limit_work ? api->can_limit_work(mythr) : 0xffffffff;
+	struct timeval diff, wdiff;
+	uint32_t max_nonce;
+	uint32_t last_nonce;
 	unsigned long long hashes_done = 0;
-	unsigned long long hashes;
+	int64_t hashes = -1;
 	struct work *work = make_work();
+	struct work running_work, *prw;
 	const time_t request_interval = opt_scantime * 2 / 3 ? : 1;
 	unsigned const long request_nonce = MAXTHREADS / 3 * 2;
 	bool requested = false;
+	bool need_new_job, skip_hashmeter;
 	const bool primary = (!mythr->device_thread) || mythr->primary_thread;
 
 	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 
-	gettimeofday(&getwork_start, NULL);
+	if (!job_prepare) {
+		// Old device API, implemented using wrappers
+		job_prepare = scanhash_prepare;
+		job_get_results = scanhash_process;
+		prw = work;
+	}
+	else
+		prw = &running_work;
+
+	if (api->can_limit_work)
+		mythr->can_limit_work = true;
 
 	if (api->thread_init && !api->thread_init(mythr)) {
 		cgpu->device_last_not_well = time(NULL);
@@ -3964,14 +4007,19 @@ void *miner_thread(void *userdata)
 		goto out;
 	}
 
+	max_nonce = api->can_limit_work ? api->can_limit_work(mythr) : 0xffffffff;
+
+	const long cyclecs = mythr->results_delayed ? 10 : ((opt_log_interval * 100 / 5) ? : 1);
+
 	thread_reportout(mythr);
 	applog(LOG_DEBUG, "Popping ping in miner thread");
 	tq_pop(mythr->q, NULL); /* Wait for a ping to start */
 
-	sdiff.tv_sec = sdiff.tv_usec = 0;
 	gettimeofday(&tv_lastupdate, NULL);
 
 	while (1) {
+getwork:
+		applog(LOG_DEBUG, "%s %u.%u: Getting work (work_restart=%d)", api->name, cgpu->device_id, mythr->device_thread, work_restart[thr_id].restart);
 		work_restart[thr_id].restart = 0;
 		if (api->free_work && likely(work->pool))
 			api->free_work(mythr, work);
@@ -3990,124 +4038,165 @@ void *miner_thread(void *userdata)
 			break;
 		}
 
+		// While working on a single struct work
 		do {
-			gettimeofday(&tv_start, NULL);
-
-			timersub(&tv_start, &getwork_start, &getwork_start);
-
-			timeradd(&getwork_start,
-				&(dev_stats->getwork_wait),
-				&(dev_stats->getwork_wait));
-			if (timercmp(&getwork_start, &(dev_stats->getwork_wait_max), >)) {
-				dev_stats->getwork_wait_max.tv_sec = getwork_start.tv_sec;
-				dev_stats->getwork_wait_max.tv_usec = getwork_start.tv_usec;
-			}
-			if (timercmp(&getwork_start, &(dev_stats->getwork_wait_min), <)) {
-				dev_stats->getwork_wait_min.tv_sec = getwork_start.tv_sec;
-				dev_stats->getwork_wait_min.tv_usec = getwork_start.tv_usec;
-			}
-			dev_stats->getwork_calls++;
-
-			pool_stats = &(work->pool->cgminer_stats);
-
-			timeradd(&getwork_start,
-				&(pool_stats->getwork_wait),
-				&(pool_stats->getwork_wait));
-			if (timercmp(&getwork_start, &(pool_stats->getwork_wait_max), >)) {
-				pool_stats->getwork_wait_max.tv_sec = getwork_start.tv_sec;
-				pool_stats->getwork_wait_max.tv_usec = getwork_start.tv_usec;
-			}
-			if (timercmp(&getwork_start, &(pool_stats->getwork_wait_min), <)) {
-				pool_stats->getwork_wait_min.tv_sec = getwork_start.tv_sec;
-				pool_stats->getwork_wait_min.tv_usec = getwork_start.tv_usec;
-			}
-			pool_stats->getwork_calls++;
-
-			hashes = api->scanhash(mythr, work, work->blk.nonce + max_nonce);
-
-			gettimeofday(&getwork_start, NULL);
-
-			if (unlikely(work_restart[thr_id].restart)) {
-
-				/* Apart from device_thread 0, we stagger the
-				 * starting of every next thread to try and get
-				 * all devices busy before worrying about
-				 * getting work for their extra threads */
-				if (!primary) {
-					struct timespec rgtp;
-
-					rgtp.tv_sec = 0;
-					rgtp.tv_nsec = 250 * mythr->device_thread * 1000000;
-					nanosleep(&rgtp, NULL);
-				}
-				break;
-			}
-
-			if (unlikely(!hashes)) {
-				applog(LOG_ERR, "%s %d failure, disabling!", api->name, cgpu->device_id);
-				cgpu->deven = DEV_DISABLED;
-
-				cgpu->device_last_not_well = time(NULL);
-				cgpu->device_not_well_reason = REASON_THREAD_ZERO_HASH;
-				cgpu->thread_zero_hash_count++;
-
-				goto disabled;
-			}
-
-			hashes_done += hashes;
-			if (hashes > cgpu->max_hashes)
-				cgpu->max_hashes = hashes;
-
-			gettimeofday(&tv_end, NULL);
-			timeval_subtract(&diff, &tv_end, &tv_start);
-			sdiff.tv_sec += diff.tv_sec;
-			sdiff.tv_usec += diff.tv_usec;
-			if (sdiff.tv_usec > 1000000) {
-				++sdiff.tv_sec;
-				sdiff.tv_usec -= 1000000;
-			}
-
-			timeval_subtract(&wdiff, &tv_end, &tv_workstart);
-			if (!requested) {
-				if (wdiff.tv_sec > request_interval || work->blk.nonce > request_nonce) {
-					thread_reportout(mythr);
-					if (unlikely(!queue_request(mythr, false))) {
-						applog(LOG_ERR, "Failed to queue_request in miner_thread %d", thr_id);
+			last_nonce = work->blk.nonce + max_nonce;
+			applog(LOG_DEBUG, "%s %u.%u: Preparing new job (id=%08lx/%02x; nonce=%08lx-%08lx)", api->name, cgpu->device_id, mythr->device_thread, *(long*)&work->data[36], (int)work->data[71], (long)work->blk.nonce, (long)last_nonce);
+			if (job_prepare) {
+				if (!job_prepare(mythr, work, last_nonce)) {
+					if (unlikely(work->blk.nonce == 0)) {
+devfail:
+						applog(LOG_ERR, "%s %d failure, disabling!", api->name, cgpu->device_id);
+						cgpu->deven = DEV_DISABLED;
 
 						cgpu->device_last_not_well = time(NULL);
-						cgpu->device_not_well_reason = REASON_THREAD_FAIL_QUEUE;
-						cgpu->thread_fail_queue_count++;
+						cgpu->device_not_well_reason = REASON_THREAD_ZERO_HASH;
+						cgpu->thread_zero_hash_count++;
 
-						goto out;
+						goto disabled;
 					}
-					thread_reportin(mythr);
-					requested = true;
-				}
-			}
-
-			if (unlikely((long)sdiff.tv_sec < cycle)) {
-				if (likely(!api->can_limit_work || max_nonce == 0xffffffff))
-					continue;
-
-				{
-					int mult = 1000000 / ((sdiff.tv_usec + 0x400) / 0x400) + 0x10;
-					mult *= cycle;
-					if (max_nonce > (0xffffffff * 0x400) / mult)
-						max_nonce = 0xffffffff;
 					else
-						max_nonce = (max_nonce * mult) / 0x400;
+						// Probably ran out of nonce space ;)
+						break;
 				}
-			} else if (unlikely(sdiff.tv_sec > cycle) && api->can_limit_work) {
-				max_nonce = max_nonce * cycle / sdiff.tv_sec;
-			} else if (unlikely(sdiff.tv_usec > 100000) && api->can_limit_work) {
-				max_nonce = max_nonce * 0x400 / (((cycle * 1000000) + sdiff.tv_usec) / (cycle * 1000000 / 0x400));
 			}
+			need_new_job = false;
+			gettimeofday(&tv_start, NULL);
 
-			timeval_subtract(&diff, &tv_end, &tv_lastupdate);
-			if (diff.tv_sec >= opt_log_interval) {
-				hashmeter(thr_id, &diff, hashes_done);
-				hashes_done = 0;
-				tv_lastupdate = tv_end;
+			// Waiting for a single job issue
+			while(1) {
+				if (likely(hashes == -1 && mythr->job_running)) {
+					if (mythr->job_idle_usec) {
+						if (unlikely(work_restart[thr_id].restart))
+							goto work_restart;
+
+						// TODO: use epoll on Linux
+						usleep(mythr->job_idle_usec);
+					}
+
+					if (unlikely(work_restart[thr_id].restart))
+						goto work_restart;
+
+					hashes = job_get_results(mythr, prw);
+
+					if (unlikely(hashes == -2))
+						goto devfail;
+				}
+
+				if (unlikely(work_restart[thr_id].restart)) {
+work_restart:
+					/* Apart from device_thread 0, we stagger the
+					 * starting of every next thread to try and get
+					 * all devices busy before worrying about
+					 * getting work for their extra threads */
+					if (!primary) {
+						struct timespec rgtp;
+
+						rgtp.tv_sec = 0;
+						rgtp.tv_nsec = 250 * mythr->device_thread * 1000000;
+						nanosleep(&rgtp, NULL);
+					}
+					goto getwork;
+				}
+
+				if (!(mythr->job_running || need_new_job)) {
+					if (api->job_start) {
+						api->job_start(mythr);
+						if (unlikely(!mythr->job_running))
+							goto devfail;
+					}
+					need_new_job = true;
+
+					long temp = (primary && api->read_temperature) ? api->read_temperature(mythr) : 0;
+					if (temp > 0) {
+						cgpu->temp = (float)temp / 0x100;
+						if (temp > 0x100 * cgpu->cutofftemp) {
+							applog(LOG_WARNING, "Hit thermal cutoff limit on %s %d, disabling!", api->name, cgpu->device_id);
+							cgpu->deven = DEV_RECOVER;
+
+							cgpu->device_last_not_well = time(NULL);
+							cgpu->device_not_well_reason = REASON_DEV_THERMAL_CUTOFF;
+							cgpu->dev_thermal_cutoff_count++;
+						}
+					}
+				}
+
+				if (!hashes)
+					hashes = -1;
+				else
+				if (hashes > 0) {
+					if (api->job_process_results)
+						api->job_process_results(mythr, prw);
+
+					hashes_done += hashes;
+					if (hashes > cgpu->max_hashes)
+						cgpu->max_hashes = hashes;
+
+					gettimeofday(&tv_end, NULL);
+					timeval_subtract(&diff, &tv_end, &tv_start);
+					tv_start = tv_end;
+
+					timeval_subtract(&wdiff, &tv_end, &tv_workstart);
+					if (!requested) {
+						if (wdiff.tv_sec > request_interval || work->blk.nonce > request_nonce) {
+							thread_reportout(mythr);
+							if (unlikely(!queue_request(mythr, false))) {
+								applog(LOG_ERR, "Failed to queue_request in miner_thread %d", thr_id);
+
+								cgpu->device_last_not_well = time(NULL);
+								cgpu->device_not_well_reason = REASON_THREAD_FAIL_QUEUE;
+								cgpu->thread_fail_queue_count++;
+
+								goto out;
+							}
+							thread_reportin(mythr);
+							requested = true;
+						}
+					}
+
+					skip_hashmeter = !hashes_done;
+					actualcs = (diff.tv_sec * 100) + (diff.tv_usec / 10000);
+					if (unlikely(actualcs < cyclecs)) {
+						if (likely(!mythr->can_limit_work || max_nonce == 0xffffffff))
+							skip_hashmeter = true;
+						else
+						{
+							applog(LOG_DEBUG, "Took only %ldcs for %08llx nonces (goal: %ldcs)", actualcs, hashes, cyclecs);
+							int mult = 1000000 / ((diff.tv_usec + 0x400) / 0x400) + 0x10;
+							mult *= cyclecs;
+							mult /= 100;
+							if (max_nonce > (0xffffffff * 0x400) / mult)
+								max_nonce = 0xffffffff;
+							else
+								max_nonce = (hashes * mult) / 0x400;
+							applog(LOG_DEBUG, "New nonce target: %08lx", max_nonce);
+						}
+					} else if (unlikely(actualcs > cyclecs) && mythr->can_limit_work) {
+						applog(LOG_DEBUG, "Took a whole %ldcs for %08llx nonces (goal: %ldcs)", actualcs, hashes, cyclecs);
+						max_nonce = hashes * cyclecs / actualcs;
+						applog(LOG_DEBUG, "New nonce target: %08lx", max_nonce);
+					}
+
+					if (!skip_hashmeter) {
+						timeval_subtract(&diff, &tv_end, &tv_lastupdate);
+						if (diff.tv_sec >= opt_log_interval) {
+							hashmeter(thr_id, &diff, hashes_done);
+							hashes_done = 0;
+							tv_lastupdate = tv_end;
+						}
+					}
+
+					hashes = -1;
+				}
+
+				if (unlikely(need_new_job)) {
+					// Don't prepare for the next job if we're about to be paused
+					if (likely(!((mythr->pause || cgpu->deven != DEV_ENABLED) && mythr->job_running))) {
+						if (prw != work)
+							memcpy(&running_work, work, sizeof(running_work));
+						break;
+					}
+				}
 			}
 
 			if (unlikely(mythr->pause || cgpu->deven != DEV_ENABLED)) {
@@ -4120,8 +4209,6 @@ disabled:
 				thread_reportin(mythr);
 				applog(LOG_WARNING, "Thread %d being re-enabled", thr_id);
 			}
-
-			sdiff.tv_sec = sdiff.tv_usec = 0;
 		} while (!abandon_work(work, &wdiff, cgpu->max_hashes));
 	}
 

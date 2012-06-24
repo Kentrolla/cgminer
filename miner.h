@@ -240,10 +240,17 @@ struct device_api {
 	bool (*thread_prepare)(struct thr_info*);
 	uint64_t (*can_limit_work)(struct thr_info*);
 	bool (*thread_init)(struct thr_info*);
+	long (*read_temperature)(struct thr_info*);  // Return value in 1/256th of a degree centigrade
 	void (*free_work)(struct thr_info*, struct work*);
 	bool (*prepare_work)(struct thr_info*, struct work*);
-	uint64_t (*scanhash)(struct thr_info*, struct work*, uint64_t);
+	uint64_t (*scanhash)(struct thr_info*, struct work*, uint64_t);  // DEPRECATED
 	void (*thread_shutdown)(struct thr_info*);
+
+	// Job-specific functions
+	bool (*job_prepare)(struct thr_info*, struct work*, uint64_t);
+	void (*job_start)(struct thr_info*);
+	int64_t (*job_get_results)(struct thr_info*, struct work*);
+	int64_t (*job_process_results)(struct thr_info*, struct work*);  // return value ignored if job_get_results is used
 };
 
 enum dev_enable {
@@ -330,7 +337,7 @@ struct cgpu_info {
 	int threads;
 	struct thr_info **thr;
 
-	unsigned int max_hashes;
+	int64_t max_hashes;
 
 	const char *kname;
 #ifdef HAVE_OPENCL
@@ -400,6 +407,15 @@ struct thr_info {
 	void *cgpu_data;
 	struct timeval last;
 	struct timeval sick;
+
+	bool	job_running;
+	useconds_t job_idle_usec;
+	bool	can_limit_work;
+	bool	results_delayed;
+
+	// These two only used for backward-compatibility with deprecated scanhash device API:
+	uint32_t	first_nonce;
+	uint32_t	last_nonce;
 
 	bool	pause;
 	bool	getwork;
