@@ -3969,6 +3969,16 @@ static void mt_devfail(struct cgpu_info *cgpu, const struct device_api *api)
 	cgpu->thread_zero_hash_count++;
 }
 
+static void mt_disabled(struct thr_info *mythr, const int thr_id)
+{
+	mythr->rolling = mythr->cgpu->rolling = 0;
+	applog(LOG_DEBUG, "Popping wakeup ping in miner thread");
+	thread_reportout(mythr);
+	tq_pop(mythr->q, NULL); /* Ignore ping that's popped */
+	thread_reportin(mythr);
+	applog(LOG_WARNING, "Thread %d being re-enabled", thr_id);
+}
+
 void *miner_thread(void *userdata)
 {
 	struct thr_info *mythr = userdata;
@@ -4056,7 +4066,7 @@ getwork:
 				if (!job_prepare(mythr, work, last_nonce)) {
 					if (unlikely(work->blk.nonce == 0)) {
 						mt_devfail(cgpu, api);
-						goto disabled;
+						mt_disabled(mythr, thr_id);
 					} else
 						// Probably ran out of nonce space ;)
 						break;
@@ -4083,7 +4093,8 @@ getwork:
 
 					if (unlikely(hashes == -2)) {
 						mt_devfail(cgpu, api);
-						goto disabled;
+						mt_disabled(mythr, thr_id);
+						continue;
 					}
 				}
 
@@ -4110,7 +4121,8 @@ work_restart:
 						api->job_start(mythr);
 						if (unlikely(!mythr->job_running)) {
 							mt_devfail(cgpu, api);
-							goto disabled;
+							mt_disabled(mythr, thr_id);
+							continue;
 						}
 					}
 					need_new_job = true;
@@ -4207,13 +4219,7 @@ work_restart:
 
 			if (unlikely(mythr->pause || cgpu->deven != DEV_ENABLED)) {
 				applog(LOG_WARNING, "Thread %d being disabled", thr_id);
-disabled:
-				mythr->rolling = mythr->cgpu->rolling = 0;
-				applog(LOG_DEBUG, "Popping wakeup ping in miner thread");
-				thread_reportout(mythr);
-				tq_pop(mythr->q, NULL); /* Ignore ping that's popped */
-				thread_reportin(mythr);
-				applog(LOG_WARNING, "Thread %d being re-enabled", thr_id);
+				mt_disabled(mythr, thr_id);
 			}
 		} while (!abandon_work(work, &wdiff, cgpu->max_hashes));
 	}
