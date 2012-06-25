@@ -4037,8 +4037,20 @@ void *miner_thread(void *userdata)
 
 	gettimeofday(&tv_lastupdate, NULL);
 
-	while (1) {
 getwork:
+	while (1) {
+		/* Apart from device_thread 0, we stagger the
+		 * starting of every next thread to try and get
+		 * all devices busy before worrying about
+		 * getting work for their extra threads */
+		if (!primary) {
+			struct timespec rgtp;
+
+			rgtp.tv_sec = 0;
+			rgtp.tv_nsec = 250 * mythr->device_thread * 1000000;
+			nanosleep(&rgtp, NULL);
+		}
+
 		applog(LOG_DEBUG, "%s %u.%u: Getting work (work_restart=%d)", api->name, cgpu->device_id, mythr->device_thread, work_restart[thr_id].restart);
 		work_restart[thr_id].restart = 0;
 		if (api->free_work && likely(work->pool))
@@ -4080,14 +4092,14 @@ getwork:
 				if (likely(hashes == -1 && mythr->job_running)) {
 					if (mythr->job_idle_usec) {
 						if (unlikely(work_restart[thr_id].restart))
-							goto work_restart;
+							goto getwork;
 
 						// TODO: use epoll on Linux
 						usleep(mythr->job_idle_usec);
 					}
 
 					if (unlikely(work_restart[thr_id].restart))
-						goto work_restart;
+						goto getwork;
 
 					hashes = job_get_results(mythr, prw);
 
@@ -4098,21 +4110,8 @@ getwork:
 					}
 				}
 
-				if (unlikely(work_restart[thr_id].restart)) {
-work_restart:
-					/* Apart from device_thread 0, we stagger the
-					 * starting of every next thread to try and get
-					 * all devices busy before worrying about
-					 * getting work for their extra threads */
-					if (!primary) {
-						struct timespec rgtp;
-
-						rgtp.tv_sec = 0;
-						rgtp.tv_nsec = 250 * mythr->device_thread * 1000000;
-						nanosleep(&rgtp, NULL);
-					}
+				if (unlikely(work_restart[thr_id].restart))
 					goto getwork;
-				}
 
 				if (!(mythr->job_running || need_new_job)) {
 					long temp;
