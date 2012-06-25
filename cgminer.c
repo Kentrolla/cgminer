@@ -4054,8 +4054,7 @@ devfail:
 						cgpu->thread_zero_hash_count++;
 
 						goto disabled;
-					}
-					else
+					} else
 						// Probably ran out of nonce space ;)
 						break;
 				}
@@ -4100,6 +4099,8 @@ work_restart:
 				}
 
 				if (!(mythr->job_running || need_new_job)) {
+					long temp;
+
 					if (api->job_start) {
 						api->job_start(mythr);
 						if (unlikely(!mythr->job_running))
@@ -4107,7 +4108,7 @@ work_restart:
 					}
 					need_new_job = true;
 
-					long temp = (primary && api->read_temperature) ? api->read_temperature(mythr) : 0;
+					temp = (primary && api->read_temperature) ? api->read_temperature(mythr) : 0;
 					if (temp > 0) {
 						cgpu->temp = (float)temp / 0x100;
 						if (temp > 0x100 * cgpu->cutofftemp) {
@@ -4123,8 +4124,7 @@ work_restart:
 
 				if (!hashes)
 					hashes = -1;
-				else
-				if (hashes > 0) {
+				else if (hashes > 0) {
 					if (api->job_process_results)
 						api->job_process_results(mythr, prw);
 
@@ -4159,8 +4159,7 @@ work_restart:
 					if (unlikely(actualcs < cyclecs)) {
 						if (likely(!mythr->can_limit_work || max_nonce == 0xffffffff))
 							skip_hashmeter = true;
-						else
-						{
+						else {
 							applog(LOG_DEBUG, "Took only %ldcs for %08llx nonces (goal: %ldcs)", actualcs, hashes, cyclecs);
 							int mult = 1000000 / ((diff.tv_usec + 0x400) / 0x400) + 0x10;
 							mult *= cyclecs;
