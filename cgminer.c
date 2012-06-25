@@ -116,7 +116,7 @@ struct list_head scan_devices;
 static signed int devices_enabled;
 static bool opt_removedisabled;
 int total_devices;
-struct cgpu_info *devices[MAX_DEVICES];
+struct cgpu_info **devices;
 bool have_opencl;
 int opt_n_threads = -1;
 int mining_threads;
@@ -190,7 +190,7 @@ unsigned int found_blocks;
 unsigned int local_work;
 unsigned int total_go, total_ro;
 
-struct pool *pools[MAX_POOLS];
+struct pool **pools;
 static struct pool *currentpool = NULL;
 
 int total_pools;
@@ -395,6 +395,7 @@ static struct pool *add_pool(void)
 	if (!pool)
 		quit(1, "Failed to malloc pool in add_pool");
 	pool->pool_no = pool->prio = total_pools;
+	pools = realloc(pools, sizeof(struct pool *) * (total_pools + 2));
 	pools[total_pools++] = pool;
 	if (unlikely(pthread_mutex_init(&pool->pool_lock, NULL)))
 		quit(1, "Failed to pthread_mutex_init in add_pool");
@@ -3550,7 +3551,7 @@ static bool queue_request(struct thr_info *thr, bool needed)
 	struct workio_cmd *wc;
 	struct timeval now;
 	time_t scan_post;
-	int toq, rq, rs;
+	int rq, rs;
 	bool ret = true;
 
 	/* Prevent multiple requests being executed at once */
@@ -3577,42 +3578,33 @@ static bool queue_request(struct thr_info *thr, bool needed)
 
 	requested_tv_sec = now.tv_sec;
 
-	if (rq > rs)
-		toq = rq - mining_threads;
-	else
-		toq = rs - mining_threads;
+	inc_queued();
 
-	do {
-		inc_queued();
+	/* fill out work request message */
+	wc = calloc(1, sizeof(*wc));
+	if (unlikely(!wc)) {
+		applog(LOG_ERR, "Failed to calloc wc in queue_request");
+		ret = false;
+		goto out;
+	}
 
-		/* fill out work request message */
-		wc = calloc(1, sizeof(*wc));
-		if (unlikely(!wc)) {
-			applog(LOG_ERR, "Failed to calloc wc in queue_request");
-			ret = false;
-			break;
-		}
+	wc->cmd = WC_GET_WORK;
+	wc->thr = thr;
 
-		wc->cmd = WC_GET_WORK;
-		wc->thr = thr;
+	/* If we're queueing work faster than we can stage it, consider the
+	 * system lagging and allow work to be gathered from another pool if
+	 * possible */
+	if (rq && needed && !rs && !opt_fail_only)
+		wc->lagging = true;
 
-		/* If we're queueing work faster than we can stage it, consider the
-		 * system lagging and allow work to be gathered from another pool if
-		 * possible */
-		if (rq && needed && !rs && !opt_fail_only)
-			wc->lagging = true;
+	applog(LOG_DEBUG, "Queueing getwork request to work thread");
 
-		applog(LOG_DEBUG, "Queueing getwork request to work thread");
-
-		/* send work request to workio thread */
-		if (unlikely(!tq_push(thr_info[work_thr_id].q, wc))) {
-			applog(LOG_ERR, "Failed to tq_push in queue_request");
-			workio_cmd_free(wc);
-			ret = false;
-			break;
-		}
-
-	} while (--toq > 0);
+	/* send work request to workio thread */
+	if (unlikely(!tq_push(thr_info[work_thr_id].q, wc))) {
+		applog(LOG_ERR, "Failed to tq_push in queue_request");
+		workio_cmd_free(wc);
+		ret = false;
+	}
 
 out:
 	control_tclear(&queueing);
@@ -4809,12 +4801,9 @@ char *curses_input(const char *query)
 }
 #endif
 
-int add_pool_details(bool live, char *url, char *user, char *pass)
+void add_pool_details(bool live, char *url, char *user, char *pass)
 {
 	struct pool *pool;
-
-	if (total_pools == MAX_POOLS)
-		return ADD_POOL_MAXIMUM;
 
 	pool = add_pool();
 
@@ -4831,8 +4820,6 @@ int add_pool_details(bool live, char *url, char *user, char *pass)
 	pool->enabled = POOL_ENABLED;
 	if (live && !pool_active(pool, false))
 		pool->idle = true;
-
-	return ADD_POOL_OK;
 }
 
 #ifdef HAVE_CURSES
@@ -4842,10 +4829,6 @@ static bool input_pool(bool live)
 	bool ret = false;
 
 	immedok(logwin, true);
-	if (total_pools == MAX_POOLS) {
-		wlogprint("Reached maximum number of pools.\n");
-		goto out;
-	}
 	wlogprint("Input server details.\n");
 
 	url = curses_input("URL");
@@ -4873,7 +4856,8 @@ static bool input_pool(bool live)
 	if (!pass)
 		goto out;
 
-	ret = (add_pool_details(live, url, user, pass) == ADD_POOL_OK);
+	add_pool_details(live, url, user, pass);
+	ret = true;
 out:
 	immedok(logwin, false);
 
@@ -5043,6 +5027,7 @@ bool add_cgpu(struct cgpu_info*cgpu)
 		cgpu->device_id = d->lastid = 0;
 		HASH_ADD_STR(devids, name, d);
 	}
+	devices = realloc(devices, sizeof(struct cgpu_info *) * (total_devices + 2));
 	devices[total_devices++] = cgpu;
 	return true;
 }
@@ -5131,8 +5116,6 @@ int main(int argc, char *argv[])
 	for (i = 0; i < MAX_GPUDEVICES; i++)
 		gpus[i].dynamic = true;
 #endif
-
-	memset(devices, 0, sizeof(devices));
 
 	/* parse command line */
 	opt_register_table(opt_config_table,
