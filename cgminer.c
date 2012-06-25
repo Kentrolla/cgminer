@@ -3959,6 +3959,16 @@ static int64_t scanhash_process(struct thr_info*thr, struct work*work)
 	return scanhash_res ? (int64_t)scanhash_res : -2;
 }
 
+static void mt_devfail(struct cgpu_info *cgpu, const struct device_api *api)
+{
+	applog(LOG_ERR, "%s %d failure, disabling!", api->name, cgpu->device_id);
+	cgpu->deven = DEV_DISABLED;
+
+	cgpu->device_last_not_well = time(NULL);
+	cgpu->device_not_well_reason = REASON_THREAD_ZERO_HASH;
+	cgpu->thread_zero_hash_count++;
+}
+
 void *miner_thread(void *userdata)
 {
 	struct thr_info *mythr = userdata;
@@ -4045,14 +4055,7 @@ getwork:
 			if (job_prepare) {
 				if (!job_prepare(mythr, work, last_nonce)) {
 					if (unlikely(work->blk.nonce == 0)) {
-devfail:
-						applog(LOG_ERR, "%s %d failure, disabling!", api->name, cgpu->device_id);
-						cgpu->deven = DEV_DISABLED;
-
-						cgpu->device_last_not_well = time(NULL);
-						cgpu->device_not_well_reason = REASON_THREAD_ZERO_HASH;
-						cgpu->thread_zero_hash_count++;
-
+						mt_devfail(cgpu, api);
 						goto disabled;
 					} else
 						// Probably ran out of nonce space ;)
@@ -4078,8 +4081,10 @@ devfail:
 
 					hashes = job_get_results(mythr, prw);
 
-					if (unlikely(hashes == -2))
-						goto devfail;
+					if (unlikely(hashes == -2)) {
+						mt_devfail(cgpu, api);
+						goto disabled;
+					}
 				}
 
 				if (unlikely(work_restart[thr_id].restart)) {
@@ -4103,8 +4108,10 @@ work_restart:
 
 					if (api->job_start) {
 						api->job_start(mythr);
-						if (unlikely(!mythr->job_running))
-							goto devfail;
+						if (unlikely(!mythr->job_running)) {
+							mt_devfail(cgpu, api);
+							goto disabled;
+						}
 					}
 					need_new_job = true;
 
