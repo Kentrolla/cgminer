@@ -352,7 +352,7 @@ struct cgpu_info {
 
 	struct timeval tv_gpustart;;
 	struct timeval tv_gpuend;
-	double gpu_ms_average;
+	double gpu_us_average;
 #endif
 
 	float temp;
@@ -540,6 +540,7 @@ extern bool opt_autofan;
 extern bool opt_autoengine;
 extern bool use_curses;
 extern char *opt_api_allow;
+extern char *opt_api_groups;
 extern char *opt_api_description;
 extern int opt_api_port;
 extern bool opt_api_listen;
@@ -635,6 +636,7 @@ extern unsigned int local_work;
 extern unsigned int total_go, total_ro;
 extern const int opt_cutofftemp;
 extern int opt_log_interval;
+extern unsigned long long global_hashrate;
 
 #ifdef HAVE_OPENCL
 typedef struct {

@@ -69,9 +69,7 @@ enum workio_commands {
 struct workio_cmd {
 	enum workio_commands	cmd;
 	struct thr_info		*thr;
-	union {
-		struct work	*work;
-	} u;
+	struct work		*work;
 	bool			lagging;
 };
 
@@ -102,6 +100,7 @@ int opt_scantime = 60;
 int opt_expiry = 120;
 int opt_bench_algo = -1;
 static const bool opt_time = true;
+unsigned long long global_hashrate;
 
 #ifdef HAVE_OPENCL
 int opt_dynamic_interval = 7;
@@ -133,6 +132,7 @@ bool opt_autofan;
 bool opt_autoengine;
 bool opt_noadl;
 char *opt_api_allow = NULL;
+char *opt_api_groups;
 char *opt_api_description = PACKAGE_STRING;
 int opt_api_port = 4028;
 bool opt_api_listen;
@@ -682,6 +682,13 @@ static char *set_api_allow(const char *arg)
 	return NULL;
 }
 
+static char *set_api_groups(const char *arg)
+{
+	opt_set_charp(arg, &opt_api_groups);
+
+	return NULL;
+}
+
 static char *set_api_description(const char *arg)
 {
 	opt_set_charp(arg, &opt_api_description);
@@ -732,10 +739,13 @@ static struct opt_table opt_config_table[] = {
 #endif
 	OPT_WITH_ARG("--api-allow",
 		     set_api_allow, NULL, NULL,
-		     "Allow API access only to the given list of IP[/Prefix] addresses[/subnets]"),
+		     "Allow API access only to the given list of [G:]IP[/Prefix] addresses[/subnets]"),
 	OPT_WITH_ARG("--api-description",
 		     set_api_description, NULL, NULL,
 		     "Description placed in the API status header, default: cgminer version"),
+	OPT_WITH_ARG("--api-groups",
+		     set_api_groups, NULL, NULL,
+		     "API one letter groups G:cmd:cmd[,P:cmd:*...] defining the cmds a groups can use"),
 	OPT_WITHOUT_ARG("--api-listen",
 			opt_set_bool, &opt_api_listen,
 			"Enable API, default: disabled"),
@@ -1906,7 +1916,7 @@ static void workio_cmd_free(struct workio_cmd *wc)
 
 	switch (wc->cmd) {
 	case WC_SUBMIT_WORK:
-		free_work(wc->u.work);
+		free_work(wc->work);
 		break;
 	default: /* do nothing */
 		break;
@@ -2166,22 +2176,29 @@ static bool stale_work(struct work *work, bool share)
 	if (work->mandatory)
 		return false;
 
-	if (share)
-		work_expiry = opt_expiry;
-	else if (work->rolltime)
-		work_expiry = work->rolltime;
-	else
-		work_expiry = opt_scantime;
+	if (share) {
+		/* Technically the rolltime should be correct but some pools
+		 * advertise a broken expire= that is lower than a meaningful
+		 * scantime */
+		if (work->rolltime > opt_scantime)
+			work_expiry = work->rolltime;
+		else
+			work_expiry = opt_expiry;
+	} else {
+		/* Don't keep rolling work right up to the expiration */
+		if (work->rolltime > opt_scantime)
+			work_expiry = (work->rolltime - opt_scantime) * 2 / 3 + opt_scantime;
+		else /* Shouldn't happen unless someone increases scantime */
+			work_expiry = opt_scantime;
+	}
+
 	pool = work->pool;
 	/* Factor in the average getwork delay of this pool, rounding it up to
 	 * the nearest second */
 	getwork_delay = pool->cgminer_pool_stats.getwork_wait_rolling * 5 + 1;
-	if (!share) {
-		work_expiry -= getwork_delay;
-		if (unlikely(work_expiry < 5))
-			work_expiry = 5;
-	} else
-		work_expiry += getwork_delay;
+	work_expiry -= getwork_delay;
+	if (unlikely(work_expiry < 5))
+		work_expiry = 5;
 
 	gettimeofday(&now, NULL);
 	if ((now.tv_sec - work->tv_staged.tv_sec) >= work_expiry)
@@ -2213,7 +2230,7 @@ static void check_solve(struct work *work)
 static void *submit_work_thread(void *userdata)
 {
 	struct workio_cmd *wc = (struct workio_cmd *)userdata;
-	struct work *work = wc->u.work;
+	struct work *work = wc->work;
 	struct pool *pool = work->pool;
 	struct curl_ent *ce;
 	int failures = 0;
@@ -2867,6 +2884,8 @@ void write_config(FILE *fcfg)
 		fprintf(fcfg, ",\n\"api-allow\" : \"%s\"", opt_api_allow);
 	if (strcmp(opt_api_description, PACKAGE_STRING) != 0)
 		fprintf(fcfg, ",\n\"api-description\" : \"%s\"", opt_api_description);
+	if (opt_api_groups)
+		fprintf(fcfg, ",\n\"api-groups\" : \"%s\"", opt_api_groups);
 	if (opt_icarus_timing)
 		fprintf(fcfg, ",\n\"icarus-timing\" : \"%s\"", opt_icarus_timing);
 	fputs("\n}", fcfg);
@@ -3382,6 +3401,7 @@ static void hashmeter(int thr_id, struct timeval *diff,
 
 	local_secs = (double)total_diff.tv_sec + ((double)total_diff.tv_usec / 1000000.0);
 	decay_time(&rolling, local_mhashes_done / local_secs);
+	global_hashrate = roundl(rolling) * 1000000;
 
 	timeval_subtract(&total_diff, &total_tv_end, &total_tv_start);
 	total_secs = (double)total_diff.tv_sec +
@@ -3639,9 +3659,12 @@ static inline bool should_roll(struct work *work)
 	return false;
 }
 
+/* Limit rolls to 7000 to not beyond 2 hours in the future where bitcoind will
+ * reject blocks as invalid. */
 static inline bool can_roll(struct work *work)
 {
-	return (work->pool && !stale_work(work, false) && work->rolltime && !work->clone);
+	return (work->pool && work->rolltime && !work->clone &&
+		work->rolls < 7000 && !stale_work(work, false));
 }
 
 static void roll_work(struct work *work)
@@ -3845,11 +3868,11 @@ bool submit_work_sync(struct thr_info *thr, const struct work *work_in)
 		return false;
 	}
 
-	wc->u.work = make_work();
+	wc->work = make_work();
 	wc->cmd = WC_SUBMIT_WORK;
 	wc->thr = thr;
-	memcpy(wc->u.work, work_in, sizeof(*work_in));
-	wc->u.work->share_found_time = time(NULL);
+	memcpy(wc->work, work_in, sizeof(*work_in));
+	wc->work->share_found_time = time(NULL);
 
 	applog(LOG_DEBUG, "Pushing submit work to work thread");
 
