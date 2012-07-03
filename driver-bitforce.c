@@ -288,56 +288,29 @@ re_send:
 	return true;
 }
 
-static uint64_t bitforce_get_result(struct thr_info *thr, struct work *work)
+static bool bitforce_results(struct cgpu_info *bitforce, int fdDev, char *pdevbuf)
 {
-	unsigned int delay_time_ms = BITFORCE_CHECK_INTERVAL_MS;
-	struct cgpu_info *bitforce = thr->cgpu;
-	int fdDev = bitforce->device_fd;
-	char pdevbuf[0x100];
+	mutex_lock(&bitforce->device_mutex);
+	BFwrite(fdDev, "ZFX", 3);
+	BFgets(pdevbuf, sizeof(pdevbuf), fdDev);
+	mutex_unlock(&bitforce->device_mutex);
+
+	if (pdevbuf[0] && pdevbuf[0] != 'B')
+		return true;
+	return false;
+}
+
+static uint64_t
+bitforce_submit_results(struct thr_info *thr, struct cgpu_info *bitforce,
+			struct work *work, char *pdevbuf)
+{
 	char *pnoncebuf;
 	uint32_t nonce;
 
-
-	if (!fdDev)
-		return 0;
-
-	while (bitforce->wait_ms < BITFORCE_TIMEOUT_MS) {
-		if (unlikely(work_restart[thr->id].restart))
-			return 1;
-		mutex_lock(&bitforce->device_mutex);
-		BFwrite(fdDev, "ZFX", 3);
-		BFgets(pdevbuf, sizeof(pdevbuf), fdDev);
-		mutex_unlock(&bitforce->device_mutex);
-		if (pdevbuf[0] && pdevbuf[0] != 'B') /* BFL does not respond during throttling */
-			break;
-		/* if BFL is throttling, no point checking so quickly */
-		delay_time_ms = (pdevbuf[0] ? BITFORCE_CHECK_INTERVAL_MS : 2*WORK_CHECK_INTERVAL_MS);
-		usleep(delay_time_ms * 1000);
-		bitforce->wait_ms += delay_time_ms;
-	}
-
-	if (bitforce->wait_ms >= BITFORCE_TIMEOUT_MS) {
-		applog(LOG_ERR, "BFL%i: took longer than 10s", bitforce->device_id);
-		bitforce->device_last_not_well = time(NULL);
-		bitforce->device_not_well_reason = REASON_DEV_OVER_HEAT;
-		bitforce->dev_over_heat_count++;
-		return 1;
-	} else if (pdevbuf[0] == 'N') {/* Hashing complete (NONCE-FOUND or NO-NONCE) */
-		    /* Simple timing adjustment */
-	        delay_time_ms = bitforce->sleep_ms;
-		if (bitforce->wait_ms > (bitforce->sleep_ms + BITFORCE_CHECK_INTERVAL_MS))
-			bitforce->sleep_ms += (unsigned int) ((double) (bitforce->wait_ms - bitforce->sleep_ms) / 1.6);
-		else if (bitforce->wait_ms == bitforce->sleep_ms)
-			bitforce->sleep_ms -= BITFORCE_CHECK_INTERVAL_MS;
-		if (delay_time_ms != bitforce->sleep_ms)
-			  applog(LOG_DEBUG, "BFL%i: Wait time changed to: %d. Waited: %d", bitforce->device_id, bitforce->sleep_ms, bitforce->wait_ms);
-	}
-
-	applog(LOG_DEBUG, "BFL%i: waited %dms until %s", bitforce->device_id, bitforce->wait_ms, pdevbuf);
 	work->blk.nonce = 0xffffffff;
-	if (pdevbuf[2] == '-') 
+	if (pdevbuf[2] == '-')
 		return 0xffffffff;   /* No valid nonce found */
-	else if (pdevbuf[0] == 'I') 
+	else if (pdevbuf[0] == 'I')
 		return 1;          /* Device idle */
 	else if (strncasecmp(pdevbuf, "NONCE-FOUND", 11)) {
 		applog(LOG_WARNING, "BFL%i: Error: Get result reports: %s", bitforce->device_id, pdevbuf);
@@ -360,6 +333,46 @@ static uint64_t bitforce_get_result(struct thr_info *thr, struct work *work)
 	return 0xffffffff;
 }
 
+static uint64_t bitforce_get_result(struct thr_info *thr, struct work *work)
+{
+	unsigned int delay_time_ms = BITFORCE_CHECK_INTERVAL_MS;
+	struct cgpu_info *bitforce = thr->cgpu;
+	int fdDev = bitforce->device_fd;
+	char pdevbuf[0x100];
+
+	while (bitforce->wait_ms < BITFORCE_TIMEOUT_MS) {
+		if (unlikely(work_restart[thr->id].restart))
+			return 1;
+		if (bitforce_results(bitforce, fdDev, pdevbuf))  /* BFL does not respond during throttling */
+			break;
+		/* if BFL is throttling, no point checking so quickly */
+		delay_time_ms = (pdevbuf[0] ? BITFORCE_CHECK_INTERVAL_MS : 2 * WORK_CHECK_INTERVAL_MS);
+		usleep(delay_time_ms * 1000);
+		bitforce->wait_ms += delay_time_ms;
+	}
+
+	if (bitforce->wait_ms >= BITFORCE_TIMEOUT_MS) {
+		applog(LOG_ERR, "BFL%i: took longer than 10s", bitforce->device_id);
+		bitforce->device_last_not_well = time(NULL);
+		bitforce->device_not_well_reason = REASON_DEV_OVER_HEAT;
+		bitforce->dev_over_heat_count++;
+		return 1;
+	} else if (pdevbuf[0] == 'N') {/* Hashing complete (NONCE-FOUND or NO-NONCE) */
+		    /* Simple timing adjustment */
+	        delay_time_ms = bitforce->sleep_ms;
+		if (bitforce->wait_ms > (bitforce->sleep_ms + BITFORCE_CHECK_INTERVAL_MS))
+			bitforce->sleep_ms += (unsigned int) ((double) (bitforce->wait_ms - bitforce->sleep_ms) / 1.6);
+		else if (bitforce->wait_ms == bitforce->sleep_ms)
+			bitforce->sleep_ms -= BITFORCE_CHECK_INTERVAL_MS;
+		if (delay_time_ms != bitforce->sleep_ms)
+			  applog(LOG_DEBUG, "BFL%i: Wait time changed to: %d. Waited: %d", bitforce->device_id, bitforce->sleep_ms, bitforce->wait_ms);
+	}
+
+	applog(LOG_DEBUG, "BFL%i: waited %dms until %s", bitforce->device_id, bitforce->wait_ms, pdevbuf);
+
+	return bitforce_submit_results(thr, bitforce, work, pdevbuf);
+}
+
 static void bitforce_shutdown(struct thr_info *thr)
 {
 	struct cgpu_info *bitforce = thr->cgpu;
@@ -380,10 +393,13 @@ static uint64_t bitforce_scanhash(struct thr_info *thr, struct work *work, uint6
 	struct cgpu_info *bitforce = thr->cgpu;
 	unsigned int sleep_time;
 	struct timeval tdiff;
+	char pdevbuf[0x100];
 	uint64_t ret;
 
 	bitforce->wait_ms = 0;
 	ret = bitforce_send_work(thr, work);
+	if (unlikely(!ret))
+		goto out_ret;
 
 	/* Initially wait 2/3 of the average cycle time so we can request more
 	work before full scan is up */
@@ -396,6 +412,14 @@ static uint64_t bitforce_scanhash(struct thr_info *thr, struct work *work, uint6
 	bitforce->wait_ms += sleep_time;
 	queue_request(thr, false);
 
+	if (unlikely(bitforce_results(bitforce, bitforce->device_fd, pdevbuf))) {
+		/* We got results back suggesting device faster than expected */
+		ret = bitforce_submit_results(thr, bitforce, work, pdevbuf);
+		bitforce->sleep_ms = bitforce->sleep_ms * 2 / 3;
+		applog(LOG_DEBUG, "Shortening BFL%i sleep time to %d ms", bitforce->device_id, bitforce->sleep_ms);
+		goto out_ret;
+	}
+
 	/* Now wait athe final 1/3rd; no bitforce should be finished by now */
 	sleep_time = bitforce->sleep_ms - sleep_time;
 	tdiff.tv_sec = sleep_time / 1000;
@@ -405,9 +429,17 @@ static uint64_t bitforce_scanhash(struct thr_info *thr, struct work *work, uint6
 
 	bitforce->wait_ms += sleep_time;
 
+	if (unlikely(bitforce_results(bitforce, bitforce->device_fd, pdevbuf))) {
+		ret = bitforce_submit_results(thr, bitforce, work, pdevbuf);
+		bitforce->sleep_ms = bitforce->sleep_ms * 2 / 3;
+		applog(LOG_DEBUG, "Shortening BFL%i sleep time to %d ms", bitforce->device_id, bitforce->sleep_ms);
+		goto out_ret;
+	}
+
 	if (ret)
 		ret = bitforce_get_result(thr, work);
 
+out_ret:
 	if (!ret) {
 		ret = 1;
 		applog(LOG_ERR, "BFL%i: Comms error", bitforce->device_id);
