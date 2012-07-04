@@ -20,7 +20,7 @@
 #include "fpgautils.h"
 #include "miner.h"
 
-#define BITFORCE_SLEEP_MS 5000
+#define BITFORCE_SLEEP_MS 3000
 #define BITFORCE_TIMEOUT_MS 10000
 #define BITFORCE_CHECK_INTERVAL_MS 10
 #define WORK_CHECK_INTERVAL_MS 50
@@ -357,6 +357,15 @@ static uint64_t bitforce_get_result(struct thr_info *thr, struct work *work)
 		bitforce->device_not_well_reason = REASON_DEV_OVER_HEAT;
 		bitforce->dev_over_heat_count++;
 		return 1;
+	} else if (pdevbuf[0] == 'N') {/* Hashing complete (NONCE-FOUND or NO-NONCE) */
+		    /* Simple timing adjustment */
+	        delay_time_ms = bitforce->sleep_ms;
+		if (bitforce->wait_ms > (bitforce->sleep_ms + BITFORCE_CHECK_INTERVAL_MS))
+			bitforce->sleep_ms += (unsigned int) ((double) (bitforce->wait_ms - bitforce->sleep_ms) / 1.6);
+		else if (bitforce->wait_ms == bitforce->sleep_ms)
+			bitforce->sleep_ms -= BITFORCE_CHECK_INTERVAL_MS;
+		if (delay_time_ms != bitforce->sleep_ms)
+			  applog(LOG_DEBUG, "BFL%i: Wait time changed to: %d. Waited: %d", bitforce->device_id, bitforce->sleep_ms, bitforce->wait_ms);
 	}
 
 	applog(LOG_DEBUG, "BFL%i: waited %dms until %s", bitforce->device_id, bitforce->wait_ms, pdevbuf);
@@ -393,8 +402,8 @@ static uint64_t bitforce_scanhash(struct thr_info *thr, struct work *work, uint6
 		goto out_ret;
 
 	/* Initially wait 2/3 of the average cycle time so we can request more
-	 * work before full scan is up */
-	sleep_time = bitforce->sleep_ms * 2 / 3;
+	work before full scan is up */
+	sleep_time = (2 * bitforce->sleep_ms) / 3;
 	tdiff.tv_sec = sleep_time / 1000;
 	tdiff.tv_usec = sleep_time * 1000 - (tdiff.tv_sec * 1000000);
 	if (!restart_wait(&tdiff))
@@ -403,8 +412,16 @@ static uint64_t bitforce_scanhash(struct thr_info *thr, struct work *work, uint6
 	bitforce->wait_ms += sleep_time;
 	queue_request(thr, false);
 
+	if (unlikely(bitforce_results(bitforce, bitforce->device_fd, pdevbuf))) {
+		/* We got results back suggesting device faster than expected */
+		ret = bitforce_submit_results(thr, bitforce, work, pdevbuf);
+		bitforce->sleep_ms = bitforce->sleep_ms * 2 / 3;
+		applog(LOG_DEBUG, "Shortening BFL%i sleep time to %d ms", bitforce->device_id, bitforce->sleep_ms);
+		goto out_ret;
+	}
+
 	/* Now wait athe final 1/3rd; no bitforce should be finished by now */
-	sleep_time = bitforce->sleep_ms * 1 / 6;
+	sleep_time = bitforce->sleep_ms - sleep_time;
 	tdiff.tv_sec = sleep_time / 1000;
 	tdiff.tv_usec = sleep_time * 1000 - (tdiff.tv_sec * 1000000);
 	if (!restart_wait(&tdiff))
@@ -413,7 +430,6 @@ static uint64_t bitforce_scanhash(struct thr_info *thr, struct work *work, uint6
 	bitforce->wait_ms += sleep_time;
 
 	if (unlikely(bitforce_results(bitforce, bitforce->device_fd, pdevbuf))) {
-		/* We got results back suggesting device faster than expected */
 		ret = bitforce_submit_results(thr, bitforce, work, pdevbuf);
 		bitforce->sleep_ms = bitforce->sleep_ms * 2 / 3;
 		applog(LOG_DEBUG, "Shortening BFL%i sleep time to %d ms", bitforce->device_id, bitforce->sleep_ms);
